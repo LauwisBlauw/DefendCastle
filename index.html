@@ -602,7 +602,8 @@
     body:has(#level-select.visible) #btn-start,
     body:has(#level-select.visible) #btn-pause,
     body:has(#level-select.visible) #btn-speed,
-    body:has(#level-select.visible) #scroll-hint {
+    body:has(#level-select.visible) #scroll-hint,
+    body:has(#level-select.visible) #wave-preview {
       display: none !important;
     }
 
@@ -1397,6 +1398,55 @@
       z-index: 50;
       font-family: 'Nunito', sans-serif;
     }
+    /* ── NEXT-WAVE PREVIEW ──
+       Small card under the HUD, top-right. Visible only between waves so it
+       never competes with combat for attention. */
+    #wave-preview {
+      position: fixed;
+      top: 92px; right: 14px;
+      max-width: 300px;
+      background: rgba(8, 14, 28, 0.92);
+      border: 1px solid rgba(255, 180, 60, 0.4);
+      border-radius: 10px;
+      padding: 9px 12px 10px;
+      color: #ffeedd;
+      font-family: 'Nunito', sans-serif;
+      font-size: 12px;
+      z-index: 60;
+      pointer-events: none;
+      box-shadow: 0 5px 22px rgba(0,0,0,0.55);
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    #wave-preview.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    #wave-preview .wp-title {
+      font-family: 'Fredoka One', sans-serif;
+      font-size: 13px;
+      color: #ffcc66;
+      margin-bottom: 6px;
+      letter-spacing: 0.02em;
+    }
+    #wave-preview .wp-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+    #wave-preview .wp-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 7px;
+      padding: 2px 6px;
+      font-size: 12px;
+      cursor: default;
+    }
+    #wave-preview .wp-chip b { font-size: 11px; color: #ffd9a0; font-weight: 800; }
+    #wave-preview .wp-tags { margin-top: 7px; display: flex; flex-direction: column; gap: 4px; }
+    #wave-preview .wp-tag {
+      font-size: 11px; font-weight: 800;
+      border-radius: 6px; padding: 2px 7px;
+      width: fit-content;
+    }
+    #wave-preview .wp-siege { background: rgba(255,80,40,0.18); border: 1px solid rgba(255,110,60,0.5); color: #ffb09a; }
+    #wave-preview .wp-boss  { background: rgba(170,40,255,0.16); border: 1px solid rgba(190,90,255,0.5); color: #dcb2ff; }
+
     /* ── DEFENDER PANEL ── */
     #defender-panel {
       position: fixed;
@@ -1663,6 +1713,22 @@
       background: linear-gradient(135deg,#7799ff,#4455dd);
       border: 2px solid rgba(160,190,255,0.75); cursor: pointer;
     }
+    .esc-mute-btn {
+      background: rgba(60,80,200,0.18);
+      border: 1px solid rgba(120,150,255,0.35);
+      border-radius: 7px;
+      width: 30px; height: 26px; flex-shrink: 0;
+      font-size: 13px; line-height: 1;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+    .esc-mute-btn:hover { background: rgba(90,110,255,0.30); transform: scale(1.08); }
+    .esc-mute-btn.muted { background: rgba(200,40,40,0.22); border-color: rgba(255,90,90,0.5); }
+    .esc-hint {
+      font-family: 'Nunito', sans-serif; font-size: 11px;
+      color: rgba(180,200,255,0.45); padding-top: 3px;
+    }
+    .esc-hint b { color: rgba(210,225,255,0.8); }
 
 
     /* keep the old IDs — panels still need them for active state */
@@ -2537,6 +2603,9 @@
 
   <div id="scroll-hint">Scroll · Drag to orbit</div>
 
+  <!-- NEXT-WAVE PREVIEW — populated by updateWavePreview() between waves -->
+  <div id="wave-preview" aria-live="polite"></div>
+
   <!-- ESC MENU -->
   <div id="esc-menu">
     <div id="esc-menu-box">
@@ -2560,15 +2629,18 @@
         <hr class="esc-divider">
         <div class="esc-settings-heading">Settings</div>
         <div class="esc-slider-row">
-          <span class="esc-slider-label">🔊 SFX</span>
+          <button class="esc-mute-btn" id="sfx-mute" title="Mute / unmute sound effects" aria-label="Mute sound effects">🔊</button>
+          <span class="esc-slider-label">SFX</span>
           <input type="range" class="esc-range" id="sfx-slider" min="0" max="100" value="32">
           <span class="esc-slider-val" id="sfx-val">32</span>
         </div>
         <div class="esc-slider-row">
-          <span class="esc-slider-label">🎵 Music</span>
+          <button class="esc-mute-btn" id="music-mute" title="Mute / unmute music" aria-label="Mute music">🎵</button>
+          <span class="esc-slider-label">Music</span>
           <input type="range" class="esc-range" id="music-slider" min="0" max="100" value="0">
           <span class="esc-slider-val" id="music-val">0</span>
         </div>
+        <div class="esc-hint">Press <b>M</b> in-game to mute / unmute everything</div>
       </div>
     </div>
   </div>
@@ -2948,7 +3020,7 @@
 
   <!-- BOTTOM BUILD PANEL -->
   <div id="build-panel">
-    <div id="panel-label">Build Menu  •  <span style="opacity:0.7">Enter start wave  ·  P pause  ·  1-9·0 select  ·  drag-paint walls  ·  Q deselect  ·  right-click cancel  ·  U upgrade  ·  X sell  ·  R rally</span></div>
+    <div id="panel-label">Build Menu  •  <span style="opacity:0.7">Enter start wave  ·  P pause  ·  M mute  ·  1-9·0 select  ·  drag-paint walls  ·  Q deselect  ·  right-click cancel  ·  U upgrade  ·  X sell  ·  R rally</span></div>
     <div id="build-cards">
 
       <div class="build-card" data-tool="wall" data-hotkey="1">

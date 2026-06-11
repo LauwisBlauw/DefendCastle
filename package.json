@@ -5,12 +5,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "diag": "bash scripts/run-diagnostic.sh"
+    "diag": "bash scripts/run-diagnostic.sh",
+    "headless": "node scripts/headless-client.mjs"
   },
   "dependencies": {
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "playwright-core": "^1.60.0",
     "vite": "^5.4.0"
   }
 }

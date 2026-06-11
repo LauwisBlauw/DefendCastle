@@ -9084,9 +9084,13 @@ function updateWebZones(dt) {
 // ─────────────────────────────────────────────
 //  WAVE SPAWNER — 12 designed waves + scaling
 // ─────────────────────────────────────────────
-function buildSpawnQueue(waveNum) {
-  const q = [];
-  const add = (type, n) => { for (let i = 0; i < n; i++) q.push(type); };
+// Pure base composition for a wave — ordered [type, count] pairs, no randomness,
+// no side effects. buildSpawnQueue() turns this into the actual spawn queue
+// (cluster-shuffle, elite rolls, pacing); the next-wave preview HUD reads it
+// directly so the player can see what's coming and build counters in advance.
+function waveComposition(waveNum) {
+  const comp = [];
+  const add = (type, n) => comp.push([type, n]);
 
   // Waves 1-12: hand-tuned progression
   // Early (1-4):  learn the basics, manageable with minimal defenses
@@ -9143,6 +9147,14 @@ function buildSpawnQueue(waveNum) {
     add('exploder',   3 + Math.ceil(n * 0.55));
     add('healerOrc',  2 + Math.ceil(n * 0.4));
     add('rockTroll',  1 + Math.ceil(n * 0.3));
+  }
+  return comp;
+}
+
+function buildSpawnQueue(waveNum) {
+  const q = [];
+  for (const [type, n] of waveComposition(waveNum)) {
+    for (let i = 0; i < n; i++) q.push(type);
   }
 
   // Cluster-shuffle: group into cohorts of 2–3 enemies (preserving add() order internally)
@@ -9349,6 +9361,7 @@ function checkWaveEnd() {
     showMerchant();
   } else {
     document.getElementById('btn-start').disabled = false;
+    updateHUD(); // re-run now that Start is live: ready-pulse + next-wave preview
   }
 
   showTooltip(`Wave ${wave} complete! +${bonus}🟡 gold bonus`, 3000);
@@ -9525,6 +9538,57 @@ const elGameOver  = document.getElementById('game-over');
 const elGoStats   = document.getElementById('go-stats');
 const elBtnStart  = document.getElementById('btn-start');
 
+// ── Next-wave preview ────────────────────────────────────────────────────────
+// Shown between waves (whenever Start Wave is ready) so the player can scout the
+// incoming composition and build counters before committing. Reads the pure
+// waveComposition() — elite rolls and siege extras stay a surprise, but the tags
+// warn about them.
+const ENEMY_INFO = {
+  grunt:       { icon: '👹', name: 'Grunt' },
+  brute:       { icon: '👺', name: 'Brute' },
+  boss:        { icon: '👑', name: 'Ogre Champion' },
+  troll:       { icon: '🧌', name: 'Troll (regenerates)' },
+  skeleton:    { icon: '💀', name: 'Skeleton (fast)' },
+  wolf:        { icon: '🐺', name: 'Wolf (fast)' },
+  spider:      { icon: '🕷️', name: 'Spider (very fast, webs)' },
+  cyclops:     { icon: '👁️', name: 'Cyclops (melee crusher)' },
+  enemyArcher: { icon: '🏹', name: 'Orc Archer (ranged)' },
+  exploder:    { icon: '💣', name: 'Exploder (blows up on death)' },
+  healerOrc:   { icon: '💚', name: 'Healer Shaman (heals allies)' },
+  orcMage:     { icon: '🔮', name: 'Orc Mage (ranged, explodes)' },
+  rockTroll:   { icon: '🗿', name: 'Rock Troll (tank, throws boulders)' },
+};
+const elWavePreview = document.getElementById('wave-preview');
+let _wavePreviewKey = '';
+function updateWavePreview() {
+  if (!elWavePreview) return;
+  const ready = elBtnStart && !elBtnStart.disabled && !waveActive && !gameOver && !testMode;
+  if (!ready) {
+    if (_wavePreviewKey !== '') { _wavePreviewKey = ''; elWavePreview.classList.remove('visible'); }
+    return;
+  }
+  const next = wave + 1;
+  const isBossWave = !!(currentLevel && currentLevel.id !== 'endless'
+    && next === currentLevel.endWave && currentLevel.boss);
+  // Rebuild the DOM only when the upcoming wave actually changes
+  const key = `${next}|${currentLevel?.id ?? 'free'}|${isBossWave}`;
+  if (_wavePreviewKey === key) return;
+  _wavePreviewKey = key;
+
+  const chips = waveComposition(next).map(([type, n]) => {
+    const info = ENEMY_INFO[type] || { icon: '👾', name: type };
+    return `<span class="wp-chip" title="${info.name}">${info.icon}<b>×${n}</b></span>`;
+  }).join('');
+  const tags = [];
+  if (next % 5 === 0) tags.push('<span class="wp-tag wp-siege">⚔️ SIEGE — 40% bigger, elites!</span>');
+  if (isBossWave)     tags.push(`<span class="wp-tag wp-boss">👑 BOSS — ${currentLevel.boss.name}</span>`);
+  elWavePreview.innerHTML =
+    `<div class="wp-title">⚔️ Next: Wave ${next}</div>` +
+    `<div class="wp-chips">${chips}</div>` +
+    (tags.length ? `<div class="wp-tags">${tags.join('')}</div>` : '');
+  elWavePreview.classList.add('visible');
+}
+
 function getMaxDefenders() {
   return Math.min(26, CFG.MAX_DEFENDERS + wave);
 }
@@ -9585,6 +9649,7 @@ function updateHUD() {
     const startReady = !elBtnStart.disabled && !waveActive && !gameOver && !testMode;
     elBtnStart.classList.toggle('ready', startReady);
   }
+  updateWavePreview();
   updateCastleHPBar();
 }
 
@@ -9825,6 +9890,7 @@ function showMerchant() {
       offer.apply();
       modal.classList.remove('visible');
       elBtnStart.disabled = false;
+      updateHUD(); // refresh ready-pulse + next-wave preview now that Start is live again
       showTooltip(`${offer.icon} ${offer.name} activated!`, 2000);
     });
     offersEl.appendChild(card);
@@ -9835,6 +9901,7 @@ function showMerchant() {
 document.getElementById('btn-merchant-skip').addEventListener('click', () => {
   document.getElementById('merchant').classList.remove('visible');
   elBtnStart.disabled = false;
+  updateHUD(); // refresh ready-pulse + next-wave preview
 });
 
 // Feature 2: persistent high score
@@ -10480,6 +10547,14 @@ function updateCastleTurrets(dt) {
 // ─────────────────────────────────────────────
 const clock = new THREE.Clock();
 let _gameLoopRafId = null; // track pending rAF so enterTestMode can cancel it
+
+// ── Headless / CI mode ──────────────────────────────────────────────────────
+// `?headless` skips almost all rendering so the TEST harness can run game
+// logic at full speed under software GL (CI containers, headless Chromium,
+// where a full render takes 300ms+). One frame per second is still drawn so
+// screenshots stay meaningful.
+const HEADLESS = new URLSearchParams(window.location.search).has('headless');
+let _lastHeadlessRenderMs = 0;
 let _defVoiceTimer = 5 + Math.random() * 7;   // seconds until next defender chatter
 let _orcVoiceTimer = 3 + Math.random() * 6;   // seconds until next enemy roar
 let _intensityCheckTimer = 0;
@@ -10693,7 +10768,10 @@ function gameLoop() {
   if (selectedDef && _defPanel.style.display !== 'none') _updateDefPanelPos();
 
   controls.update();
-  renderer.render(scene, camera);
+  if (!HEADLESS || performance.now() - _lastHeadlessRenderMs > 1000) {
+    _lastHeadlessRenderMs = performance.now();
+    renderer.render(scene, camera);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -10933,6 +11011,7 @@ window.addEventListener('keyup', e => { _camKeys.delete(e.code); });
 //  • U           → upgrade currently selected defender (if affordable)
 //  • X / Delete  → sell currently selected defender
 //  • R           → set/cancel rally for selected soldier
+//  • M           → mute / unmute all audio
 //  All ignored while typing in inputs / studio mode / map editor.
 // ─────────────────────────────────────────────
 window.addEventListener('keydown', (e) => {
@@ -10961,6 +11040,12 @@ window.addEventListener('keydown', (e) => {
   // P → toggle pause / play (skip in test mode, which drives its own speed slider)
   if (e.key === 'p' || e.key === 'P') {
     if (!testMode) { e.preventDefault(); elBtnPause?.click(); }
+    return;
+  }
+  // M → mute / unmute all audio (defined in _initSettings)
+  if (e.key === 'm' || e.key === 'M') {
+    e.preventDefault();
+    window._toggleGlobalMute?.();
     return;
   }
 
@@ -15344,37 +15429,69 @@ document.querySelectorAll('.diff-btn').forEach(btn => {
   }
   const sfxDef   = saved.sfx   != null ? saved.sfx   : 32;
   const musicDef = saved.music > 0     ? saved.music : 40;
+  let sfxMuted   = !!saved.sfxMuted;
+  let musicMuted = !!saved.musicMuted;
 
   const sfxSlider   = document.getElementById('sfx-slider');
   const musicSlider = document.getElementById('music-slider');
   const sfxValEl    = document.getElementById('sfx-val');
   const musicValEl  = document.getElementById('music-val');
+  const sfxMuteBtn   = document.getElementById('sfx-mute');
+  const musicMuteBtn = document.getElementById('music-mute');
 
   sfxSlider.value   = sfxDef;
   musicSlider.value = musicDef;
   sfxValEl.textContent   = sfxDef;
   musicValEl.textContent = musicDef;
 
-  SND.setSfxVol(sfxDef / 100);
-  SND.setMusicVol(musicDef / 100);
-
   function _save() {
     saveSave('td_settings', {
       sfx:   +sfxSlider.value,
       music: +musicSlider.value,
+      sfxMuted, musicMuted,
     });
   }
 
+  // Mute is a layer on top of the sliders: the slider keeps its value, mute
+  // just gates the output, so unmuting restores the exact previous volume.
+  function _applyVolumes() {
+    SND.setSfxVol(sfxMuted ? 0 : sfxSlider.value / 100);
+    SND.setMusicVol(musicMuted ? 0 : musicSlider.value / 100);
+    if (sfxMuteBtn) {
+      sfxMuteBtn.textContent = sfxMuted ? '🔇' : '🔊';
+      sfxMuteBtn.classList.toggle('muted', sfxMuted);
+    }
+    if (musicMuteBtn) {
+      musicMuteBtn.textContent = musicMuted ? '🔇' : '🎵';
+      musicMuteBtn.classList.toggle('muted', musicMuted);
+    }
+  }
+  _applyVolumes();
+
   sfxSlider.addEventListener('input', () => {
     sfxValEl.textContent = sfxSlider.value;
-    SND.setSfxVol(sfxSlider.value / 100);
+    if (+sfxSlider.value > 0) sfxMuted = false; // dragging the slider implies "I want sound"
+    _applyVolumes();
     _save();
   });
   musicSlider.addEventListener('input', () => {
     musicValEl.textContent = musicSlider.value;
-    SND.setMusicVol(musicSlider.value / 100);
+    if (+musicSlider.value > 0) musicMuted = false;
+    _applyVolumes();
     _save();
   });
+  sfxMuteBtn?.addEventListener('click', () => { sfxMuted = !sfxMuted; _applyVolumes(); _save(); });
+  musicMuteBtn?.addEventListener('click', () => { musicMuted = !musicMuted; _applyVolumes(); _save(); });
+
+  // Global mute hotkey: M toggles everything at once. Exposed for the keydown
+  // handler (which lives outside this closure and filters out typing contexts).
+  window._toggleGlobalMute = () => {
+    const anyOn = !sfxMuted || !musicMuted;
+    sfxMuted = musicMuted = anyOn; // if anything is audible → mute all; else unmute all
+    _applyVolumes();
+    _save();
+    showTooltip(anyOn ? '🔇 Muted — press M to unmute' : '🔊 Sound on', 1600);
+  };
 
   // Start music / unlock AudioContext on first user interaction
   // Uses a repeating listener until the context is confirmed running (handles the case
@@ -15588,7 +15705,7 @@ loadAchievements();
 loadDifficulty();
 {
   const urlParams = new URLSearchParams(window.location.search);
-  const skipMenu = urlParams.has('test') || urlParams.has('studio') || urlParams.has('map') || urlParams.has('nomenu');
+  const skipMenu = urlParams.has('test') || urlParams.has('studio') || urlParams.has('map') || urlParams.has('nomenu') || urlParams.has('headless');
   if (skipMenu) {
     showTooltip('3 roads! Place Walls on roads to block enemies — they\'ll fight through!', 6000);
   } else {
