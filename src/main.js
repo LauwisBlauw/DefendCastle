@@ -10591,14 +10591,25 @@ function gameLoop() {
   gameTime += dt;
 
   if (!gameOver) {
-    updateSpawner(dt);
-    updateTestSpawner(dt);
-    updateOrcs(dt, t);
-    updateDefenders(dt, t);
-    updateCastleTurrets(dt);
-    updateProjectiles(dt);
-    updateVFX(dt);
-    updateWebZones(dt);
+    // Substep the combat simulation so high game speeds stay accurate at low
+    // frame rates: a single 0.1-0.2s step makes enemies blow past engagement
+    // checks and defenders lose whole attack windows, so 2×/4× play on a slow
+    // machine (or the headless test harness) silently favored the attackers.
+    // Animations read phase fields, so passing the same `t` per substep is fine.
+    const MAX_STEP = 1 / 30;
+    let _remaining = dt;
+    do {
+      const sdt = Math.min(_remaining, MAX_STEP);
+      _remaining -= sdt;
+      updateSpawner(sdt);
+      updateTestSpawner(sdt);
+      updateOrcs(sdt, t);
+      updateDefenders(sdt, t);
+      updateCastleTurrets(sdt);
+      updateProjectiles(sdt);
+      updateVFX(sdt);
+      updateWebZones(sdt);
+    } while (_remaining > 1e-9);
 
     // ── Dynamic music intensity ───────────────────────────────────────────
     _intensityCheckTimer -= dt;
