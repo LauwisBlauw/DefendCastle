@@ -17,6 +17,13 @@ const slim = r => ({
   killEff: r.killEfficiency, time: r.duration + 's',
 });
 
+// ── 0. Warm-up ────────────────────────────────────────────────────────────────
+//  The very first battle after a page load can stall (arena warm-up race:
+//  enemies spawn but never path; reported as TIMEOUT). Run a throwaway
+//  skirmish so the real matrix starts from a warmed, known-good state.
+console.log('[DIAG] Warm-up battle (discarded)…');
+await TEST.battle({ label: 'warmup', defenders: [], enemies: [['grunt', 1]], speed: SPEED, timeout: 10 });
+
 // ── 1. Individual matchup matrix ─────────────────────────────────────────────
 //  Each defender type (1 unit, row 26) vs key threats.
 //  Reveals which units are unviable or overtuned for specific enemies.

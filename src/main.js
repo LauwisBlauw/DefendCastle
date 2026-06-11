@@ -13565,7 +13565,7 @@ function _buildFormation(type, count, centerCol) {
  * then fewer escaped, then more HP remaining, then lower cost.
  */
 function _cmpOutcome(a, b) {
-  const score = { WIN: 3, PARTIAL: 1, LOSS: 0 };
+  const score = { WIN: 3, PARTIAL: 1, LOSS: 0, TIMEOUT: -1 };
   const dv = (score[b.verdict] ?? 0) - (score[a.verdict] ?? 0);
   if (dv !== 0) return dv;
   const de = a.escaped - b.escaped;
@@ -14073,7 +14073,11 @@ function _cmpOutcome(a, b) {
     }, 0) + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
     const totalStartHp = defenders.reduce((sum, d) => sum + (_bs.defHpAtStart.get(d) ?? d.maxHp), 0)
       + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
-    const verdict = escaped === 0 ? 'WIN' : killed === 0 ? 'LOSS' : 'PARTIAL';
+    // TIMEOUT: enemies spawned but none resolved (killed or escaped) — the battle
+    // stalled (e.g. rare arena warm-up race right after page load). Without this
+    // a stalled battle reads as a flawless WIN and poisons sweep/optimizer rankings.
+    const verdict = (spawned > 0 && killed === 0 && escaped === 0) ? 'TIMEOUT'
+      : escaped === 0 ? 'WIN' : killed === 0 ? 'LOSS' : 'PARTIAL';
 
     // Per-defender snapshot: merge live defenders with killed ones (which are
     // spliced from the array after their death animation finishes)
