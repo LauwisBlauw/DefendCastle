@@ -652,6 +652,115 @@ const CLOUD_STYLE = {
   Vibe:     { color: 0x7a55cc, opacity: 0.60 },
 };
 
+// ── AMBIENT PARTICLES — per-biome atmosphere motes ──────────────────────────
+// One pooled THREE.Points cloud restyled per biome: fireflies drifting low
+// over the Meadow, falling snow in the Icelands, rising embers over Lava,
+// ash flakes in Mordor, neon motes in Vibe. Driven by wall-clock time like
+// the clouds (ambience shouldn't fast-forward at 2× or freeze on pause).
+const AMBIENT_STYLE = {
+  Meadow:   { color: 0xdfff7a, size: 0.30, opacity: 0.75, add: true,  count: 90,  mode: 'firefly', yMin: 0.4, yMax: 4.5, spd: [0.4, 0.9] },
+  Desert:   { color: 0xd8b878, size: 0.50, opacity: 0.26, add: false, count: 140, mode: 'drift',   yMin: 0.5, yMax: 9,   spd: [1.2, 2.6] },
+  Icelands: { color: 0xffffff, size: 0.38, opacity: 0.90, add: false, count: 220, mode: 'fall',    yMin: 0,   yMax: 22,  spd: [1.2, 2.4] },
+  Lava:     { color: 0xff7733, size: 0.32, opacity: 0.90, add: true,  count: 160, mode: 'rise',    yMin: 0,   yMax: 14,  spd: [0.8, 1.8] },
+  Mordor:   { color: 0x77695a, size: 0.42, opacity: 0.50, add: false, count: 150, mode: 'fall',    yMin: 0,   yMax: 18,  spd: [0.5, 1.1] },
+  Doom:     { color: 0xcc2255, size: 0.28, opacity: 0.70, add: true,  count: 110, mode: 'rise',    yMin: 0,   yMax: 12,  spd: [0.5, 1.2] },
+  Vibe:     { color: 0xff55dd, size: 0.30, opacity: 0.80, add: true,  count: 120, mode: 'rise',    yMin: 0,   yMax: 14,  spd: [0.4, 1.0] },
+};
+const AMBIENT_MAX = 220;
+const _ambPos  = new Float32Array(AMBIENT_MAX * 3);
+const _ambSeed = []; // { spd, ph } per particle
+const _ambGeo  = new THREE.BufferGeometry();
+_ambGeo.setAttribute('position', new THREE.BufferAttribute(_ambPos, 3));
+const ambientPtsMat = new THREE.PointsMaterial({
+  color: 0xdfff7a, size: 0.3, transparent: true, opacity: 0.75,
+  depthWrite: false, sizeAttenuation: true,
+});
+const ambientPts = new THREE.Points(_ambGeo, ambientPtsMat);
+ambientPts.frustumCulled = false; // positions update on CPU; skip stale-bounds culling
+scene.add(ambientPts);
+let _ambStyle = AMBIENT_STYLE.Meadow;
+function _applyAmbientStyle(name) {
+  _ambStyle = AMBIENT_STYLE[name] || AMBIENT_STYLE.Meadow;
+  const s = _ambStyle;
+  ambientPtsMat.color.setHex(s.color);
+  ambientPtsMat.size = s.size;
+  ambientPtsMat.opacity = s.opacity;
+  ambientPtsMat.blending = s.add ? THREE.AdditiveBlending : THREE.NormalBlending;
+  ambientPtsMat.needsUpdate = true;
+  _ambGeo.setDrawRange(0, s.count);
+  _ambSeed.length = 0;
+  for (let i = 0; i < s.count; i++) {
+    _ambPos[i * 3]     = -2 + Math.random() * 78; // x: across the whole field
+    _ambPos[i * 3 + 1] = s.yMin + Math.random() * (s.yMax - s.yMin);
+    _ambPos[i * 3 + 2] = -2 + Math.random() * 60; // z
+    _ambSeed.push({ spd: s.spd[0] + Math.random() * (s.spd[1] - s.spd[0]), ph: Math.random() * Math.PI * 2 });
+  }
+  _ambGeo.attributes.position.needsUpdate = true;
+}
+function updateAmbientParticles(rawDt, t) {
+  const s = _ambStyle;
+  for (let i = 0; i < s.count; i++) {
+    const j = i * 3, sd = _ambSeed[i];
+    if (!sd) break;
+    if (s.mode === 'fall') {
+      _ambPos[j + 1] -= sd.spd * rawDt;
+      _ambPos[j]     += Math.sin(t * 0.5 + sd.ph) * 0.4 * rawDt;
+      if (_ambPos[j + 1] < s.yMin) _ambPos[j + 1] = s.yMax;
+    } else if (s.mode === 'rise') {
+      _ambPos[j + 1] += sd.spd * rawDt;
+      _ambPos[j]     += Math.sin(t * 0.8 + sd.ph) * 0.6 * rawDt;
+      if (_ambPos[j + 1] > s.yMax) _ambPos[j + 1] = s.yMin;
+    } else if (s.mode === 'drift') {
+      _ambPos[j]     += sd.spd * rawDt;
+      _ambPos[j + 1] += Math.sin(t * 0.6 + sd.ph) * 0.25 * rawDt;
+      if (_ambPos[j] > 78) _ambPos[j] = -4;
+    } else { // firefly: gentle 3D wander inside a low band
+      _ambPos[j]     += Math.sin(t * 0.35 + sd.ph) * sd.spd * rawDt;
+      _ambPos[j + 2] += Math.cos(t * 0.30 + sd.ph * 1.7) * sd.spd * rawDt;
+      _ambPos[j + 1] += Math.sin(t * 0.85 + sd.ph) * 0.3 * rawDt;
+      if (_ambPos[j + 1] < s.yMin) _ambPos[j + 1] = s.yMin;
+      if (_ambPos[j + 1] > s.yMax) _ambPos[j + 1] = s.yMax;
+    }
+  }
+  // Fireflies softly pulse as a swarm
+  if (s.mode === 'firefly') ambientPtsMat.opacity = s.opacity * (0.65 + 0.35 * Math.sin(t * 1.8));
+  _ambGeo.attributes.position.needsUpdate = true;
+}
+
+// ── DAY/NIGHT CYCLE — endless mode only ─────────────────────────────────────
+// A slow sinusoidal brightness sweep (4-minute day) layered multiplicatively
+// over the active biome's base lighting, so long endless runs breathe between
+// noon and deep night. Every frame recomputes from the biome table, and the
+// exact base values are restored the moment the player leaves endless.
+const DAYNIGHT_PERIOD = 240; // seconds per full day
+let _dnWasActive = false;
+function updateDayNight(t) {
+  const active = currentLevel?.id === 'endless' && activeBiomeIdx >= 0;
+  const b = BIOMES[activeBiomeIdx];
+  if (!active || !b) {
+    if (_dnWasActive && b) {
+      _dnWasActive = false;
+      sun.intensity       = b.sun[1];
+      ambient.intensity   = b.ambient[1];
+      hemiLight.intensity = b.hemi[2];
+      skyDomeMat.uniforms.topColor.value.setHex(b.bg);
+      skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]);
+      scene.fog.color.setHex(b.fog[0]);
+    }
+    return;
+  }
+  _dnWasActive = true;
+  const cyc    = 0.5 + 0.5 * Math.sin(t * Math.PI * 2 / DAYNIGHT_PERIOD); // 1 = noon, 0 = midnight
+  const lightF = 0.55 + 0.45 * cyc;   // lights never fully die — the game stays readable at night
+  const skyF   = 0.40 + 0.60 * cyc;
+  sun.intensity       = b.sun[1]     * lightF;
+  ambient.intensity   = b.ambient[1] * lightF;
+  hemiLight.intensity = b.hemi[2]    * lightF;
+  skyDomeMat.uniforms.topColor.value.setHex(b.bg).multiplyScalar(skyF);
+  skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]).multiplyScalar(skyF);
+  scene.fog.color.setHex(b.fog[0]).multiplyScalar(skyF);
+}
+
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -2960,6 +3069,7 @@ function applyBiome(idx) {
   const cs = CLOUD_STYLE[b.name] || { color: 0xffffff, opacity: 0.9 };
   cloudMat.color.setHex(cs.color);
   cloudMat.opacity = cs.opacity;
+  _applyAmbientStyle(b.name);
 
   ambient.color.setHex(b.ambient[0]);   ambient.intensity   = b.ambient[1];
   sun.color.setHex(b.sun[0]);            sun.intensity       = b.sun[1];
@@ -10692,7 +10802,8 @@ function _testWait(ms) {
 function gameLoop() {
   if (!testMode) _gameLoopRafId = requestAnimationFrame(gameLoop);
   else if (_mcTickEnabled) _scheduleTestTick();
-  const dt = Math.min(clock.getDelta(), 0.05) * gameSpeed;
+  const rawDt = Math.min(clock.getDelta(), 0.05); // wall-clock step — drives ambience (clouds, motes)
+  const dt = rawDt * gameSpeed;
   const t  = clock.elapsedTime;
   gameTime += dt;
 
@@ -10787,6 +10898,8 @@ function gameLoop() {
     }
 
     updateClouds(t);
+  updateAmbientParticles(rawDt, t);
+  updateDayNight(t);
   M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
     M.waterDeep.emissiveIntensity    = 0.28 + Math.sin(t * 1.7) * 0.12;
     M.waterShallow.emissiveIntensity = 0.18 + Math.sin(t * 1.4 + 0.6) * 0.09;
