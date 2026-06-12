@@ -607,6 +607,51 @@ skyDome.position.set(36, 0, 27);
 skyDome.renderOrder = -10;
 scene.add(skyDome);
 
+// ── VOXEL CLOUDS — chunky flat clusters drifting over the map ──────────────
+// They cast real shadows, so cloud shade slowly sweeps across the battlefield.
+// Tint/opacity follow the biome (bright over Meadow, ash-dark over Mordor).
+// Drift uses wall-clock elapsed time: ambient motion shouldn't speed up at 2×
+// game speed, and it keeps the menu backdrop alive while paused.
+const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.92 });
+const cloudGroup = new THREE.Group();
+const _clouds = [];
+{
+  // Deterministic layout (mulberry-ish hash) so the sky looks the same every load
+  const rnd = (i, s) => { const x = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return x - Math.floor(x); };
+  for (let i = 0; i < 8; i++) {
+    const c = new THREE.Group();
+    const puffs = 3 + Math.floor(rnd(i, 1) * 3);
+    for (let p = 0; p < puffs; p++) {
+      const w = 4 + rnd(i, p + 2) * 6, d = 2.5 + rnd(i, p + 9) * 4;
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, 1.1, d), cloudMat);
+      m.position.set((p - puffs / 2) * 3 + rnd(i, p + 17) * 2, rnd(i, p + 23) * 0.8, (rnd(i, p + 31) - 0.5) * 3.5);
+      m.castShadow = true;
+      c.add(m);
+    }
+    c.position.y = 26 + rnd(i, 40) * 9;
+    c.position.z = -8 + rnd(i, 50) * 70;
+    _clouds.push({ group: c, baseX: rnd(i, 60) * 140 - 30, speed: 0.45 + rnd(i, 70) * 0.5 });
+    cloudGroup.add(c);
+  }
+}
+scene.add(cloudGroup);
+function updateClouds(elapsed) {
+  for (const c of _clouds) {
+    // Wrap across [-35, 105] so clouds re-enter long before becoming visible
+    c.group.position.x = ((c.baseX + elapsed * c.speed + 35) % 140) - 35;
+  }
+}
+// Per-biome cloud dressing — keyed by biome name, falls back to plain white
+const CLOUD_STYLE = {
+  Meadow:   { color: 0xffffff, opacity: 0.92 },
+  Desert:   { color: 0xf2dcae, opacity: 0.55 },
+  Icelands: { color: 0xe8f2ff, opacity: 0.95 },
+  Lava:     { color: 0x4a2018, opacity: 0.85 },
+  Mordor:   { color: 0x3a342c, opacity: 0.88 },
+  Doom:     { color: 0x3a1226, opacity: 0.85 },
+  Vibe:     { color: 0x7a55cc, opacity: 0.60 },
+};
+
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -2912,6 +2957,9 @@ function applyBiome(idx) {
   // Sky dome gradient: fog colour at the horizon (seamless terrain fade), bg at the zenith
   skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]);
   skyDomeMat.uniforms.topColor.value.setHex(b.bg);
+  const cs = CLOUD_STYLE[b.name] || { color: 0xffffff, opacity: 0.9 };
+  cloudMat.color.setHex(cs.color);
+  cloudMat.opacity = cs.opacity;
 
   ambient.color.setHex(b.ambient[0]);   ambient.intensity   = b.ambient[1];
   sun.color.setHex(b.sun[0]);            sun.intensity       = b.sun[1];
@@ -10738,7 +10786,8 @@ function gameLoop() {
       }
     }
 
-    M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
+    updateClouds(t);
+  M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
     M.waterDeep.emissiveIntensity    = 0.28 + Math.sin(t * 1.7) * 0.12;
     M.waterShallow.emissiveIntensity = 0.18 + Math.sin(t * 1.4 + 0.6) * 0.09;
     waterSurfaces.forEach(ws => {

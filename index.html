@@ -1388,6 +1388,13 @@
     }
     #btn-retry:active { transform: translateY(1px) scale(0.97); }
 
+    #vignette {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 4; /* above the 3D canvas, below every UI layer (studio canvas sits at 500) */
+      background: radial-gradient(ellipse 85% 75% at 50% 45%, transparent 58%, rgba(2,2,12,0.34) 100%);
+    }
+
     #scroll-hint {
       position: fixed;
       top: 74px; right: 14px;
@@ -2600,6 +2607,9 @@
     <button id="btn-menu">⚙ Menu</button>
     <button id="btn-start">▶ Start Wave</button>
   </div>
+
+  <!-- Subtle vignette over the 3D view (under all UI) — zero render cost -->
+  <div id="vignette" aria-hidden="true"></div>
 
   <div id="scroll-hint">Scroll · Drag to orbit</div>
 
