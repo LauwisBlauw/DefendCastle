@@ -24,8 +24,11 @@ const VH = parseInt(process.env.SHOT_H || '320', 10);
 const page = await browser.newPage({ viewport: { width: VW, height: VH }, deviceScaleFactor: 1 });
 page.on('console', m => console.log('[console]', m.text().slice(0, 300)));
 page.on('pageerror', e => console.log('[pageerror]', e.message));
-await page.goto('http://localhost:5173', { waitUntil: 'load' });
-console.log('[ctl] page loaded');
+// Default straight into test mode with rendering skipped — that's what the
+// automated diag/battle workflows need. Override with GAME_URL for other modes.
+const URL = process.env.GAME_URL || 'http://localhost:5173/?test&headless';
+await page.goto(URL, { waitUntil: 'load' });
+console.log('[ctl] page loaded:', URL);
 
 http.createServer(async (req, res) => {
   try {
