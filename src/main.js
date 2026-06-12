@@ -15538,13 +15538,18 @@ elBtnStart.addEventListener('click', () => {
   }
   // Inside a level, the layout + biome are fixed (set in startLevel). Only rotate
   // when playing endless/no-level mode, so level themes don't get overwritten.
+  // layoutChanged/biomeChanged stay false in level mode — they're read again at the
+  // bottom of startWave for the banner tooltip (referencing them there used to throw:
+  // they were block-scoped to this if, killing the tail of every wave start).
   const inLevelNonEndless = currentLevel && currentLevel.id !== 'endless';
+  let layoutIdx = activeLayoutIdx, biomeIdx = activeBiomeIdx;
+  let layoutChanged = false, biomeChanged = false;
   if (!inLevelNonEndless) {
     // Waves 1-3: Blitz (short paths, fast action). Wave 4+: cycle through longer layouts.
-    const layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
-    const biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
-    const layoutChanged = layoutIdx !== activeLayoutIdx;
-    const biomeChanged  = biomeIdx  !== activeBiomeIdx;
+    layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
+    biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
+    layoutChanged = layoutIdx !== activeLayoutIdx;
+    biomeChanged  = biomeIdx  !== activeBiomeIdx;
     const hasEditorPaths = _mePaths.some(p => p.length > 0);
     if (layoutChanged && !hasEditorPaths) {
       applyLayout(layoutIdx);
