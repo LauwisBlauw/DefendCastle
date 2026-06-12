@@ -13940,11 +13940,11 @@ function _cmpOutcome(a, b) {
       code: `// 3-lane optimizer vs wave 10\nTEST.lanes(3);\nawait TEST.optimizeWave(10, {\n  budget:400, speed:3, timeout:25,\n  testCols:[32,37,42,47]\n});` },
     // ── Wave-simulation presets (use real buildSpawnQueue compositions) ──
     { label: 'Wave 5  (3 lanes)',
-      code: `// Real wave 5 composition across 3 lanes\nTEST.lanes(3);\nplace('wall',36,22); place('wall',36,27); place('wall',36,32);\nplace('tower',38,22); place('tower',38,27); place('tower',38,32);\nplace('archer',40,22); place('archer',40,27); place('archer',40,32);\nawait TEST.wave(5, { speed:2, timeout:50 });` },
+      code: `// Real wave 5 composition across 3 lanes\n// (lanes sit on rows 22/27/32 — walls block ON the lanes, units flank them)\nTEST.lanes(3);\nplace('wall',36,22); place('wall',36,27); place('wall',36,32);\nplace('tower',38,21); place('tower',38,26); place('tower',38,31);\nplace('archer',40,23); place('archer',40,28); place('archer',40,33);\nawait TEST.wave(5, { speed:2, timeout:50 });` },
     { label: 'Wave 10 (3 lanes)',
-      code: `// Real wave 10 — full elite mix across 3 lanes\nTEST.lanes(3);\nplace('wall',34,22); place('wall',34,27); place('wall',34,32);\nplace('tower',36,22); place('tower',36,27); place('tower',36,32);\nplace('archer',38,22); place('archer',38,27); place('archer',38,32);\nplace('knight',40,22); place('knight',40,27); place('knight',40,32);\nawait TEST.wave(10, { speed:2, timeout:70 });` },
+      code: `// Real wave 10 — full elite mix across 3 lanes\n// (lanes sit on rows 22/27/32 — walls block ON the lanes, units flank them)\nTEST.lanes(3);\nplace('wall',34,22); place('wall',34,27); place('wall',34,32);\nplace('tower',36,21); place('tower',36,26); place('tower',36,31);\nplace('archer',38,23); place('archer',38,28); place('archer',38,33);\nplace('knight',40,21); place('knight',40,26); place('knight',40,31);\nawait TEST.wave(10, { speed:2, timeout:70 });` },
     { label: '3-Lane Sweep',
-      code: `// Compare single-lane vs 3-lane with same defenders\nTEST.lanes(1);\nawait TEST.battle({ label:'1-lane', defenders:[['tower',38,26],['archer',40,26],['knight',42,26]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });\nawait _testWait(1200);\nTEST.lanes(3);\nawait TEST.battle({ label:'3-lane', defenders:[['tower',38,22],['tower',38,27],['tower',38,32],['archer',40,22],['archer',40,27],['archer',40,32]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });` },
+      code: `// Compare single-lane vs 3-lane with same defenders\nTEST.lanes(1);\nawait TEST.battle({ label:'1-lane', defenders:[['tower',38,26],['archer',40,26],['knight',42,26]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });\nawait _testWait(1200);\nTEST.lanes(3);\nawait TEST.battle({ label:'3-lane', defenders:[['tower',38,21],['tower',38,26],['tower',38,31],['archer',40,23],['archer',40,28],['archer',40,33]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });` },
   ];
 
   for (const p of SCRIPT_PRESETS) {
@@ -14481,7 +14481,9 @@ function _cmpOutcome(a, b) {
         const [, count = 1] = Array.isArray(e) ? e : [e, 1];
         return s + count;
       }, 0);
-      const totalSpawned = Math.min(totalSpawnedRaw, 22);
+      // Cap must match ARENA_SPAWN_CAP (22 per lane) — a flat 22 made multi-lane
+      // battles resolve as soon as the first 22 enemies finished, ignoring the rest.
+      const totalSpawned = Math.min(totalSpawnedRaw, 22 * _arenaLanes);
 
       // Spawn enemies with column stagger — cap scales with lane count (22 per lane)
       // so multi-lane battles can handle full wave compositions without truncation.
