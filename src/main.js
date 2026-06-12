@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ─────────────────────────────────────────────
 //  CONFIG
@@ -569,17 +573,68 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x080c14);
 scene.fog = new THREE.Fog(0x080c14, 80, 160);
 
+// ── SKY DOME — vertical gradient (horizon → zenith), tinted per biome ──────
+// Replaces the flat scene.background with real atmospheric depth: pale at the
+// horizon (matching the fog colour so terrain fades seamlessly into sky),
+// deepening toward the zenith. Drawn first with no depth write so stars/moon
+// still render on top; ignores fog so it reads as sky beyond the falloff.
+const skyDomeMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  fog: false,
+  uniforms: {
+    topColor:     { value: new THREE.Color(0x5588bb) },
+    horizonColor: { value: new THREE.Color(0x88aacc) },
+  },
+  vertexShader: /* glsl */`
+    varying vec3 vWorld;
+    void main() {
+      vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 topColor;
+    uniform vec3 horizonColor;
+    varying vec3 vWorld;
+    void main() {
+      float h = normalize(vWorld - cameraPosition).y;
+      float t = smoothstep(-0.08, 0.5, h);
+      gl_FragColor = vec4(mix(horizonColor, topColor, t), 1.0);
+    }`,
+});
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(230, 24, 12), skyDomeMat);
+skyDome.position.set(36, 0, 27);
+skyDome.renderOrder = -10;
+scene.add(skyDome);
+
 const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ antialias: false, canvas });
+const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.BasicShadowMap;  // hard pixel-perfect block shadows
-renderer.toneMapping = THREE.NoToneMapping;       // pure colours, no filmic grading
+renderer.shadowMap.type = THREE.PCFShadowMap;     // blocky but not stair-stepped — keeps the voxel feel without shadow-edge crawl
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // filmic grading: richer saturation rolloff, highlights stop clipping
+renderer.toneMappingExposure = 1.35;                // ACES darkens midtones — compensate so the palette keeps its brightness
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 280);
 camera.position.set(32, 38, 68);
 camera.lookAt(32, 0, 27);
+
+// ── POST-PROCESSING — subtle bloom so emissives (lava, lanterns, crystals,
+// magic bolts, boss eyes) actually glow instead of just being bright pixels.
+// Toggleable in settings ("Glow FX"); when off, the classic single-pass
+// renderer.render path is used untouched.
+let bloomEnabled = true; // persisted via td_settings (see _initSettings)
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.45,  // strength — subtle halo, not a haze
+  0.55,  // radius
+  0.80,  // threshold — only genuinely bright/emissive surfaces bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass()); // applies tone mapping + sRGB in the composer path
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(32, 0, 27);
@@ -2854,6 +2909,9 @@ function applyBiome(idx) {
 
   scene.background.setHex(b.bg);
   scene.fog.color.setHex(b.fog[0]); scene.fog.near = b.fog[1]; scene.fog.far = b.fog[2];
+  // Sky dome gradient: fog colour at the horizon (seamless terrain fade), bg at the zenith
+  skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]);
+  skyDomeMat.uniforms.topColor.value.setHex(b.bg);
 
   ambient.color.setHex(b.ambient[0]);   ambient.intensity   = b.ambient[1];
   sun.color.setHex(b.sun[0]);            sun.intensity       = b.sun[1];
@@ -10781,7 +10839,8 @@ function gameLoop() {
   controls.update();
   if (!HEADLESS || performance.now() - _lastHeadlessRenderMs > 1000) {
     _lastHeadlessRenderMs = performance.now();
-    renderer.render(scene, camera);
+    if (bloomEnabled) composer.render();
+    else renderer.render(scene, camera);
   }
 }
 
@@ -15466,6 +15525,7 @@ document.querySelectorAll('.diff-btn').forEach(btn => {
       sfx:   +sfxSlider.value,
       music: +musicSlider.value,
       sfxMuted, musicMuted,
+      bloom: bloomEnabled,
     });
   }
 
@@ -15499,6 +15559,21 @@ document.querySelectorAll('.diff-btn').forEach(btn => {
   });
   sfxMuteBtn?.addEventListener('click', () => { sfxMuted = !sfxMuted; _applyVolumes(); _save(); });
   musicMuteBtn?.addEventListener('click', () => { musicMuted = !musicMuted; _applyVolumes(); _save(); });
+
+  // ── Glow FX (bloom) toggle — module-scoped bloomEnabled drives the render path ──
+  const bloomBtn = document.getElementById('bloom-toggle');
+  const bloomVal = document.getElementById('bloom-val');
+  bloomEnabled = saved.bloom !== false; // default ON
+  function _applyBloomUI() {
+    if (bloomVal) bloomVal.textContent = bloomEnabled ? 'On' : 'Off';
+    bloomBtn?.classList.toggle('muted', !bloomEnabled);
+  }
+  _applyBloomUI();
+  bloomBtn?.addEventListener('click', () => {
+    bloomEnabled = !bloomEnabled;
+    _applyBloomUI();
+    _save();
+  });
 
   // Global mute hotkey: M toggles everything at once. Exposed for the keydown
   // handler (which lives outside this closure and filters out typing contexts).
@@ -15693,6 +15768,8 @@ window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+      bloomPass.setSize(window.innerWidth, window.innerHeight);
     });
   }, 80);
 });
