@@ -7620,6 +7620,15 @@ function buildSoldier(col, row, soldierType) {
     const swGuard  = mesh(box(0.40, 0.07, 0.08), M.weapon);   swGuard.position.set(0, -0.08, 0); swGuard.rotation.y = Math.PI / 2; swGroup.add(swGuard);
     const swBlade  = mesh(box(0.07, 0.52, 0.05), M.weapon);   swBlade.position.set(0,   0.20, 0); swBlade.rotation.y = Math.PI / 2; swGroup.add(swBlade);
     const swTip    = mesh(box(0.045, 0.14, 0.035), M.weapon); swTip.position.set(0,     0.50, 0); swGroup.add(swTip);
+    // ── Knight grandeur: flowing heraldic cape + crest plume (additive, rig-safe) ──
+    // Local -Z is the figure's back; cape hangs from a gold mantle at the shoulders.
+    const capeClasp = mesh(box(0.46, 0.09, 0.06), M.swGold); capeClasp.position.set(0, 0.93, -0.17); g.add(capeClasp);
+    const capeUp    = mesh(box(0.44, 0.42, 0.05), M.spCape); capeUp.position.set(0, 0.66, -0.205); g.add(capeUp);
+    const capeLo    = mesh(box(0.40, 0.26, 0.05), M.spCape); capeLo.position.set(0, 0.34, -0.235); capeLo.rotation.x = -0.05; g.add(capeLo);
+    const capeHem   = mesh(box(0.41, 0.05, 0.06), M.swGold); capeHem.position.set(0, 0.215, -0.245); g.add(capeHem);
+    // Tall horsehair crest plume sweeping back off the helm crest
+    const plume1 = mesh(box(0.09, 0.16, 0.14), M.spCape); plume1.position.set(0, 1.50, -0.10); plume1.rotation.x = -0.5; g.add(plume1);
+    const plume2 = mesh(box(0.08, 0.14, 0.12), M.spCape); plume2.position.set(0, 1.42, -0.22); plume2.rotation.x = -0.9; g.add(plume2);
 
   } else if (soldierType === 'swordsman') {
     // ── SWORDSMAN — royal blue tunic, brown leather accents ──
@@ -7673,6 +7682,10 @@ function buildSoldier(col, row, soldierType) {
     const swGrd   = mesh(box(0.28, 0.06, 0.07), M.weapon);  swGrd.position.set(0, -0.04, 0); swGrd.rotation.y = Math.PI / 2; swGrp.add(swGrd);
     const swBlade = mesh(box(0.06, 0.42, 0.04), M.weapon);  swBlade.position.set(0, 0.18, 0); swBlade.rotation.y = Math.PI / 2; swGrp.add(swBlade);
     const swTip   = mesh(box(0.04, 0.12, 0.03), M.weapon);  swTip.position.set(0, 0.44, 0); swGrp.add(swTip);
+    // ── Swordsman flair: dashing half-cloak slung from the right shoulder (rig-safe) ──
+    const hcClasp = mesh(box(0.16, 0.08, 0.24), M.swGold); hcClasp.position.set(-0.18, 0.92, -0.02); g.add(hcClasp);
+    const hcUp    = mesh(box(0.30, 0.40, 0.05), M.castleFlag); hcUp.position.set(-0.06, 0.66, -0.19); hcUp.rotation.z = 0.10; g.add(hcUp);
+    const hcLo    = mesh(box(0.26, 0.22, 0.05), M.castleFlag); hcLo.position.set(-0.04, 0.36, -0.21); hcLo.rotation.z = 0.06; g.add(hcLo);
 
   } else if (soldierType === 'spearman') {
     // ── SPEARMAN — slate blue cloth, metal plates, red cape ──
@@ -7771,6 +7784,11 @@ function buildSoldier(col, row, soldierType) {
     // Hood
     const hood = mesh(box(0.38, 0.4, 0.38), M.arcHood); hood.position.y = 1.12; g.add(hood);
     const face2 = mesh(box(0.26, 0.2, 0.08), M.skin); face2.position.set(0, 1.1, 0.2); g.add(face2);
+    // ── Ranger's hooded cloak flowing down the back (rig-safe, static) ──
+    const cloakNeck = mesh(box(0.40, 0.12, 0.06), M.arcHood); cloakNeck.position.set(0, 0.92, -0.16); g.add(cloakNeck);
+    const cloakUp   = mesh(box(0.40, 0.44, 0.05), M.arcHood); cloakUp.position.set(0, 0.64, -0.19); g.add(cloakUp);
+    const cloakLo   = mesh(box(0.34, 0.26, 0.05), M.arcHood); cloakLo.position.set(0, 0.34, -0.215); cloakLo.rotation.x = -0.05; g.add(cloakLo);
+    const cloakHem  = mesh(box(0.35, 0.05, 0.06), M.arcBelt); cloakHem.position.set(0, 0.205, -0.225); g.add(cloakHem);
   }
 
   const soldierHpBar = makeHPBar(g, 1.72);
