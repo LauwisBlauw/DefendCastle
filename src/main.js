@@ -899,15 +899,28 @@ function _neutralPxTex({ spots = false, stripes = false } = {}) {
   const ctx = cv.getContext('2d');
   let s = 0x9a7f3c;
   const rng = () => { s = (Math.imul(s, 1664525) + 1013904223) | 0; return (s >>> 0) / 0x100000000; };
-  for (let y = 0; y < SZ; y++) {
-    for (let x = 0; x < SZ; x++) {
-      let v = 255 - rng() * 24;                    // hand-painted grain: only ever darkens
-      if (stripes && (y % 4 < 2)) v -= 16;         // horizontal banding
-      if (spots && rng() < 0.07)  v -= 42;         // strong dark speckles
-      const c = Math.max(0, v | 0);
-      ctx.fillStyle = `rgb(${c},${c},${c})`;
-      ctx.fillRect(x, y, 1, 1);
+  const val = new Float32Array(SZ * SZ).fill(255); // darkening-only weathering field
+
+  // COARSE blotches: a handful of soft dark patches several texels wide. Per-pixel
+  // noise (the old approach) averaged back to flat under mipmapping, so weathering
+  // vanished at gameplay distance — low-frequency blotches survive the mip chain.
+  const nBlobs = spots ? 7 : 5;
+  for (let i = 0; i < nBlobs; i++) {
+    const cx = rng() * SZ, cy = rng() * SZ;
+    const r  = 2.0 + rng() * 3.5;
+    const depth = (spots ? 46 : 30) * (0.6 + rng() * 0.4);
+    for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < r) val[y * SZ + x] -= depth * (1 - d / r);
     }
+  }
+  // Pattern overlays + fine grain
+  for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+    let v = val[y * SZ + x] - rng() * 12;          // subtle per-texel break-up on top
+    if (stripes && (y % 4 < 2)) v -= 22;           // plank / brushed-metal banding
+    const c = Math.max(20, Math.min(255, v | 0));  // floor so nothing goes pure black
+    ctx.fillStyle = `rgb(${c},${c},${c})`;
+    ctx.fillRect(x, y, 1, 1);
   }
   const tex = new THREE.CanvasTexture(cv);
   tex.magFilter = THREE.NearestFilter;
