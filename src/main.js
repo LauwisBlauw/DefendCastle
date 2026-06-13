@@ -883,10 +883,42 @@ function makePxTex(baseHex, { spots = false, stripes = false, seed = 0x9a7f3c } 
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
-// Convenience: textured MeshStandardMaterial with flat shading + NearestFilter map
+// Convenience: textured MeshStandardMaterial with flat shading + NearestFilter map.
+//
+// The map is a NEUTRAL white-based grain (darkening noise only) shared per
+// pattern, while the material's `color` carries the hue. Two reasons:
+//  1. applyBiome() re-tints several of these materials at runtime via setHex —
+//     a colour baked into the texture would double-multiply and muddy the tint.
+//  2. Darkening-only noise keeps every palette hue at its designed brightness.
+const _pxTexCache = new Map();
+function _neutralPxTex({ spots = false, stripes = false } = {}) {
+  const key = `${spots ? 1 : 0}|${stripes ? 1 : 0}`;
+  if (_pxTexCache.has(key)) return _pxTexCache.get(key);
+  const SZ = 16;
+  const cv = document.createElement('canvas'); cv.width = cv.height = SZ;
+  const ctx = cv.getContext('2d');
+  let s = 0x9a7f3c;
+  const rng = () => { s = (Math.imul(s, 1664525) + 1013904223) | 0; return (s >>> 0) / 0x100000000; };
+  for (let y = 0; y < SZ; y++) {
+    for (let x = 0; x < SZ; x++) {
+      let v = 255 - rng() * 24;                    // hand-painted grain: only ever darkens
+      if (stripes && (y % 4 < 2)) v -= 16;         // horizontal banding
+      if (spots && rng() < 0.07)  v -= 42;         // strong dark speckles
+      const c = Math.max(0, v | 0);
+      ctx.fillStyle = `rgb(${c},${c},${c})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestMipmapNearestFilter;
+  _pxTexCache.set(key, tex);
+  return tex;
+}
 function pxMat(baseHex, opts = {}, extra = {}) {
   return new THREE.MeshStandardMaterial({
     color: baseHex,
+    map: _neutralPxTex(opts),
     roughness: 0.92, metalness: 0, flatShading: true,
     ...extra,
   });
@@ -1085,6 +1117,29 @@ for (const m of Object.values(M)) markMaterialShared(m);
     if (skipKeys.has(key)) return;
     if (mat.isMeshStandardMaterial) { mat.flatShading = true; mat.needsUpdate = true; }
   });
+})();
+
+// ── Hand-painted grain on STRUCTURAL materials ──────────────────────────────
+// The creature/soldier bodies (pxMat) already carry a neutral darkening grain;
+// the stone, wood, cloth and metal of buildings & siege engines did not, so
+// they read as flat plastic next to the grained units. Apply the same shared
+// grain map here (colour stays in the material; the map only darkens), keyed by
+// surface type for the right pattern. Skipped: ground (grassA/pathMat take
+// biome ground textures), pure-glow emissives, and anything already mapped.
+(function applyStructuralGrain() {
+  // stone → pitting speckles · wood/metal → grain banding · cloth → soft noise
+  const STONE = ['castleStone','castleLight','castleDark','towerBase','wallStone','rockMat','enemyRock','spikeMetal','catMetal'];
+  const WOOD  = ['catWood','ballistaWood','ballistaArm','mageStaff','trollClub','spikeBase','arcBelt','towerRoof','catapult'];
+  const CLOTH = ['castleFlag','spCape','mageBeard','swShield','arcHood','orcTusk'];
+  const tex = (opts) => _neutralPxTex(opts);
+  const assign = (keys, opts) => keys.forEach(k => {
+    const m = M[k];
+    if (!m || m.map) return;          // skip missing or already-textured
+    m.map = tex(opts); m.needsUpdate = true;
+  });
+  assign(STONE, { spots: true });
+  assign(WOOD,  { stripes: true });
+  assign(CLOTH, {});
 })();
 
 // ─────────────────────────────────────────────
@@ -12788,11 +12843,19 @@ function _buildPreviewGroup(type, cat) {
 function _unitPreviewDisposeGroup() {
   if (!_unitPreviewGroup) return;
   if (_unitPreviewScene) _unitPreviewScene.remove(_unitPreviewGroup);
+  // Preview groups are built from the live unit builders, so they reference the
+  // SHARED M.* palette materials (and their shared grain maps). Only dispose
+  // geometry and genuinely unique materials — never shared ones, or the next
+  // in-game render of that material would show an empty (disposed) texture.
   _unitPreviewGroup.traverse(child => {
     if (!child.isMesh) return;
     child.geometry?.dispose();
     const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach(m => { if (m?.map) m.map.dispose(); m?.dispose(); });
+    mats.forEach(m => {
+      if (!m || _SHARED_MATERIALS.has(m)) return;
+      if (m.map && !_SHARED_MATERIALS.has(m)) m.map.dispose();
+      m.dispose();
+    });
   });
   _unitPreviewGroup = null;
 }
@@ -14605,6 +14668,10 @@ function _cmpOutcome(a, b) {
     balRunBtn.disabled = false;
     _balRunning = false;
   }
+
+  // Dev hook: expose core render objects so the headless test harness can drive
+  // the camera for close-up model inspection (companion to window.TEST).
+  window._DEV = { scene, camera, controls, THREE, get orcs() { return orcs; }, get defenders() { return defenders; } };
 
   // Expose global TEST API for browser console and terminal-driven scripts
   window.TEST = {
