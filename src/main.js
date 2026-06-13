@@ -949,7 +949,7 @@ const M = {
   castleFlag:   new THREE.MeshStandardMaterial({ color: 0x1e56c8 }),  // royal-blue banner — flies on castle, tower pennant & knight tabard (was red)
   castleFlagPole: new THREE.MeshStandardMaterial({ color: 0xd4a04a }), // gold trim accent
   towerBase:    new THREE.MeshStandardMaterial({ color: 0x2c3e50 }),
-  crystal:      new THREE.MeshStandardMaterial({ color: 0x00d4ff, emissive: 0x00d4ff, emissiveIntensity: 1.2 }),
+  crystal:      new THREE.MeshStandardMaterial({ color: 0x00d4ff, emissive: 0x00d4ff, emissiveIntensity: 1.9 }),
   wallStone:    new THREE.MeshStandardMaterial({ color: 0x7a8898 }),
   catWood:      new THREE.MeshStandardMaterial({ color: 0x3a2515 }),
   catMetal:     new THREE.MeshStandardMaterial({ color: 0x4a4a5a, metalness: 0.7, roughness: 0.4 }),
@@ -964,13 +964,13 @@ const M = {
   orcHead:      pxMat('#4a1c1c'),
   // Enemy faction accent = purple (glowing eyes unify all enemies as "the purple horde";
   // each species gets a slightly different shade so individual identities still read clearly).
-  orcEye:       new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.0 }),
+  orcEye:       new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.6 }),
   orcTusk:      new THREE.MeshStandardMaterial({ color: 0xf0e0c0 }),
   bruteBody:    pxMat('#4a1208', { stripes: true }), // volcanic crimson — very distinct from teal grunt
   bruteEye:     new THREE.MeshStandardMaterial({ color: 0xdd44ff, emissive: 0xdd44ff, emissiveIntensity: 1.2 }),
   bossBody:     pxMat('#2a0820', { stripes: true }), // blackened blood-purple warlord (kept dark & corrupt, nudged warm)
   trollMat:     pxMat('#3e2c1a', { spots: true }),   // rust-brown troll (shifted off olive-green into the warm horde)
-  trollEye:     new THREE.MeshStandardMaterial({ color: 0xcc22dd, emissive: 0xcc22dd, emissiveIntensity: 0.9 }),
+  trollEye:     new THREE.MeshStandardMaterial({ color: 0xcc22dd, emissive: 0xcc22dd, emissiveIntensity: 1.6 }),
   trollClub:    new THREE.MeshStandardMaterial({ color: 0x3a2510 }),
   rockTrollMat: pxMat('#564e44', { spots: true }),   // warm stone-skin rock troll (grey nudged warm so it isn't read as steel)
   rockTrollEye: new THREE.MeshStandardMaterial({ color: 0x9922ff, emissive: 0x7711cc, emissiveIntensity: 1.4 }),
@@ -979,7 +979,7 @@ const M = {
   // Wolf — warm charcoal (shifted off blue-grey so it can't be mistaken for a steel defender)
   wolfBody:     pxMat('#473a38', { stripes: true }),
   wolfHead:     pxMat('#372c2a'),
-  wolfEye:      new THREE.MeshStandardMaterial({ color: 0xbb33ff, emissive: 0xbb33ff, emissiveIntensity: 1.0 }),
+  wolfEye:      new THREE.MeshStandardMaterial({ color: 0xbb33ff, emissive: 0xbb33ff, emissiveIntensity: 1.6 }),
   // Spider — red-black carapace (shifted off blue-black; warm so it stays in the horde palette)
   spiderBody:   pxMat('#1c0808', { spots: true }),
   spiderEye:    new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.2 }),
@@ -999,7 +999,7 @@ const M = {
   // visor rims, helm crests, sword pommels, tabard emblems). Paired with royal-blue cloth +
   // steel this gives the cohesive "Azure & Gold Order" look — warm metallic gold is unmistakable
   // against the enemy's matte blood-red bodies, so it never blurs the faction line.
-  swGold:       new THREE.MeshStandardMaterial({ color: 0xe0a82a, metalness: 0.7, roughness: 0.32, emissive: 0x3a2400, emissiveIntensity: 0.22 }),
+  swGold:       new THREE.MeshStandardMaterial({ color: 0xe0a82a, metalness: 0.7, roughness: 0.32, emissive: 0xc89020, emissiveIntensity: 0.85 }),
   spCape:       new THREE.MeshStandardMaterial({ color: 0x1a2e72 }),  // deep royal-blue cape (was crimson — now matches the Azure Order)
   spHelmet:     new THREE.MeshStandardMaterial({ color: 0x62748c, metalness: 0.55, roughness: 0.45 }),  // steel blue-grey (was bronze)
   arcHood:      new THREE.MeshStandardMaterial({ color: 0x0e2c3c }),  // dark blue-teal hood (shifted off green)
