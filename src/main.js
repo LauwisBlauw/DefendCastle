@@ -7287,6 +7287,13 @@ function buildWall(col, row) {
   // Iron ring decoration on front face
   const ring = mesh(box(0.14, 0.14, 0.06), M.catMetal); ring.position.set(0, 0.62, 0.47); g.add(ring);
   const crossH = mesh(box(0.14, 0.03, 0.06), M.catMetal); crossH.position.set(0, 0.62, 0.47); g.add(crossH);
+  // Hanging heraldic banner on the front face — flies the Azure & Gold Order colours (additive)
+  const bnRod   = mesh(box(0.44, 0.05, 0.05), M.castleFlagPole); bnRod.position.set(0, 1.66, 0.50); g.add(bnRod);
+  const bnCloth = mesh(box(0.34, 0.70, 0.04), M.castleFlag);     bnCloth.position.set(0, 1.28, 0.50); g.add(bnCloth);
+  const bnTrim  = mesh(box(0.36, 0.05, 0.05), M.swGold);         bnTrim.position.set(0, 0.94, 0.505); g.add(bnTrim);
+  const bnEmblem= mesh(box(0.14, 0.16, 0.05), M.swGold);         bnEmblem.position.set(0, 1.30, 0.515); g.add(bnEmblem);
+  const bnPointL= mesh(box(0.17, 0.12, 0.04), M.castleFlag);     bnPointL.position.set(-0.085, 0.86, 0.50); g.add(bnPointL); // swallow-tail
+  const bnPointR= mesh(box(0.17, 0.12, 0.04), M.castleFlag);     bnPointR.position.set( 0.085, 0.86, 0.50); g.add(bnPointR);
   const hpBar = makeHPBar(g, 2.88);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7342,6 +7349,11 @@ function buildTower(col, row) {
   const mount = mesh(box(0.26, 0.22, 0.26), M.castleStone); mount.position.y = 2.78; g.add(mount);
   [[0.28,0.06,0],[0,0.06,0.28],[-0.28,0.06,0],[0,0.06,-0.28]].forEach(([ax,ah,az]) => {
     const arm2 = mesh(box(Math.abs(ax)||0.06, ah, Math.abs(az)||0.06), M.castleStone); arm2.position.set(ax*0.5, 2.9, az*0.5); g.add(arm2);
+  });
+  // Arcane rune studs ringing the crystal mount — glowing sigils that tie the
+  // stone tower to its crystal focus (additive; reuse the crystal glow material)
+  [[0.24,0],[0,0.24],[-0.24,0],[0,-0.24]].forEach(([rx,rz]) => {
+    const rune = mesh(box(0.06, 0.06, 0.06), M.crystal); rune.position.set(rx, 2.80, rz); g.add(rune);
   });
   // Crystal — 3-part stack (base, body, tip) with glow ring at base
   const xtalBase = mesh(box(0.26, 0.18, 0.26), M.crystal); xtalBase.position.y = 3.0; g.add(xtalBase);
@@ -7508,6 +7520,12 @@ function buildMage(col, row) {
   const hat4    = mesh(box(0.06, 0.14, 0.06), M.mageOrb);  hat4.position.y = 2.13; g.add(hat4); // glowing tip
   // Hat band — gold trim around brim base (mystic stripe)
   const hatBand = mesh(box(0.38, 0.04, 0.38), M.mageOrb);  hatBand.position.y = 1.45; g.add(hatBand);
+  // Orbiting spell-tome — a small floating grimoire wreathed in arcane light,
+  // hovering at the mage's left side (additive; animated in updateDefenders)
+  const tome = new THREE.Group(); tome.position.set(0.62, 1.05, 0.10); g.add(tome);
+  const tomeCover = mesh(box(0.06, 0.24, 0.20), M.mageRobe); tome.add(tomeCover);
+  const tomePages = mesh(box(0.08, 0.20, 0.16), M.skelBone); tome.add(tomePages);
+  const tomeRune  = mesh(box(0.09, 0.09, 0.03), M.mageOrb);  tomeRune.position.set(0.05, 0, 0); tome.add(tomeRune);
   const mageHpBar = makeHPBar(g, 2.45);
   g.position.set(col, 0, row); g.rotation.y = -Math.PI / 2; g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7570,6 +7588,12 @@ function buildBallista(col, row) {
     const leg = mesh(box(0.08, 0.28, 0.08), M.ballistaWood); leg.position.set(lx, ly, lz); g.add(leg);
     const sock = mesh(box(0.10, 0.05, 0.10), M.catMetal);    sock.position.set(lx, 0.10, lz); g.add(sock);
   });
+  // Side rack of spare bolts — a quiver of ammunition lashed to the chassis (additive)
+  const rack = mesh(box(0.10, 0.12, 0.34), M.catWood); rack.position.set(0.40, 0.30, -0.10); g.add(rack);
+  for (let i = 0; i < 3; i++) {
+    const spare = mesh(box(0.035, 0.46, 0.035), M.catWood);  spare.position.set(0.40, 0.42, -0.20 + i * 0.09); g.add(spare);
+    const spTip = mesh(box(0.06, 0.09, 0.06), M.bBoltMat);   spTip.position.set(0.40, 0.66, -0.20 + i * 0.09); g.add(spTip);
+  }
   const balHpBar = makeHPBar(g, 1.30);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7608,6 +7632,17 @@ function buildSpikeTrap(col, row) {
     const s3 = mesh(box(0.04, 0.08, 0.04), M.spikeGlow);  s3.position.set(0, 0.37, 0); sg.add(s3); // glowing tip
     spikeGroups.push(sg);
   });
+  // Heavy corner rivets on the iron frame
+  [[0.42,0.42],[0.42,-0.42],[-0.42,0.42],[-0.42,-0.42]].forEach(([rx,rz]) => {
+    const rivet = mesh(box(0.12, 0.13, 0.12), M.catMetal); rivet.position.set(rx, 0.10, rz); g.add(rivet);
+  });
+  // Grim trophies — a cracked skull impaled at the edge + scattered bones (the trap bites)
+  const skull   = mesh(box(0.17, 0.16, 0.15), M.orcTusk);  skull.position.set(0.16, 0.30, 0.30); g.add(skull);
+  const skullJaw= mesh(box(0.14, 0.05, 0.11), M.orcTusk);  skullJaw.position.set(0.16, 0.24, 0.33); g.add(skullJaw);
+  const skEyeL  = mesh(box(0.04, 0.045,0.03), M.castleDark); skEyeL.position.set(0.20, 0.31, 0.37); g.add(skEyeL);
+  const skEyeR  = mesh(box(0.04, 0.045,0.03), M.castleDark); skEyeR.position.set(0.12, 0.31, 0.37); g.add(skEyeR);
+  const bone1   = mesh(box(0.05, 0.22, 0.05), M.orcTusk);  bone1.position.set(-0.30, 0.11, -0.22); bone1.rotation.z = 1.3; g.add(bone1);
+  const bone2   = mesh(box(0.05, 0.17, 0.05), M.orcTusk);  bone2.position.set(-0.24, 0.11, 0.26); bone2.rotation.z = 1.1; bone2.rotation.y = 0.5; g.add(bone2);
   const spikeHpBar = makeHPBar(g, 0.70);
   // hide HP bar since trap is indestructible
   spikeHpBar.bg.visible = false; spikeHpBar.fg.visible = false;
