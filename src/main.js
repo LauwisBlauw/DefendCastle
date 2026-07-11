@@ -4066,6 +4066,10 @@ function spawnExploder(chosenPath) {
   // Lit fuse sprouting from the back/top — dark cord with a glowing ember tip
   const fuseCord = mesh(box(0.05, 0.22, 0.05), M.trollClub); fuseCord.position.set(0.10, 1.42, -0.06); fuseCord.rotation.z = -0.3; g.add(fuseCord);
   const fuseEmber = mesh(box(0.09, 0.09, 0.09), M.exploderBelly); fuseEmber.position.set(0.17, 1.54, -0.06); g.add(fuseEmber);
+  // Jagged scrap-metal shrapnel embedded in the hide — telegraphs a deadly blast (additive)
+  [[0.30,0.74,0.28,0.5],[-0.28,0.58,0.30,-0.6],[0.12,0.88,0.26,0.2],[-0.16,0.48,0.30,-0.35],[0.26,0.44,0.28,0.7]].forEach(([sx,sy,sz,rz]) => {
+    const shard = mesh(box(0.06, 0.17, 0.06), M.catMetal); shard.position.set(sx, sy, sz); shard.rotation.z = rz; shard.rotation.x = -0.4; g.add(shard);
+  });
   _pushEnemy(g, 'exploder', legL, legR, torso, head, 1.55, chosenPath, armL, armR);
   // Attach belly + eye refs so the update loop can pulse them (ember pulses with the belly)
   const last = orcs[orcs.length - 1];
@@ -4110,6 +4114,12 @@ function spawnHealerOrc(chosenPath) {
   const hband = mesh(box(0.48, 0.10, 0.10), M.orcTusk); hband.position.set(0, 1.30, 0.22); g.add(hband);
   const eL = mesh(box(0.09, 0.08, 0.07), M.orcEye); eL.position.set( 0.13, 1.14, 0.21); g.add(eL);
   const eR = mesh(box(0.09, 0.08, 0.07), M.orcEye); eR.position.set(-0.13, 1.14, 0.21); g.add(eR);
+  // Shaman skull-totem lashed below the staff crystal, with glowing eye sockets (additive)
+  const totemSkull = mesh(box(0.17, 0.16, 0.14), M.orcTusk);   totemSkull.position.set(0, -0.02, 0.06); armR.add(totemSkull);
+  const totemJaw   = mesh(box(0.14, 0.05, 0.11), M.orcTusk);   totemJaw.position.set(0, -0.11, 0.09);  armR.add(totemJaw);
+  const totemEyeL  = mesh(box(0.045,0.05, 0.03), M.healerGlow); totemEyeL.position.set( 0.045, 0.0, 0.13); armR.add(totemEyeL);
+  const totemEyeR  = mesh(box(0.045,0.05, 0.03), M.healerGlow); totemEyeR.position.set(-0.045, 0.0, 0.13); armR.add(totemEyeR);
+  const fetishC    = mesh(box(0.05, 0.16, 0.05), M.orcTusk);   fetishC.position.set(0, 0.60, -0.30); g.add(fetishC); // extra back charm
   _pushEnemy(g, 'healerOrc', legL, legR, body, head, 1.60, chosenPath, armL, armR);
 }
 
@@ -4170,6 +4180,11 @@ function spawnOrcMage(chosenPath) {
   const sClawR  = mesh(box(0.06, 0.22, 0.06), M.mageStaff); sClawR.position.set(-0.12, 1.68, 0); sClawR.rotation.z =  0.38; staffPivot.add(sClawR);
   // Glowing dark orb — unique per-enemy clone so we can animate its emissiveIntensity
   const staffOrb = mesh(box(0.24, 0.24, 0.24), M.orcMageOrbMat.clone()); staffOrb.position.y = 1.73; staffPivot.add(staffOrb);
+  // Skull talisman hung from the belt + curved shoulder horns — dark-sorcerer menace (additive)
+  const talis    = mesh(box(0.12, 0.12, 0.07), M.orcTusk); talis.position.set(0.22, 0.44, 0.29); g.add(talis);
+  const talisJaw = mesh(box(0.10, 0.05, 0.06), M.orcTusk); talisJaw.position.set(0.22, 0.38, 0.30); g.add(talisJaw);
+  const shHornL  = mesh(box(0.08, 0.20, 0.08), M.orcTusk); shHornL.position.set( 0.50, 1.00, 0); shHornL.rotation.z =  0.35; g.add(shHornL);
+  const shHornR  = mesh(box(0.08, 0.20, 0.08), M.orcTusk); shHornR.position.set(-0.50, 1.00, 0); shHornR.rotation.z = -0.35; g.add(shHornR);
   _pushEnemy(g, 'orcMage', legL, legR, body, head, 2.1, chosenPath, armL, armR);
   orcs[orcs.length - 1].staffOrb = staffOrb;
 }
@@ -4205,6 +4220,10 @@ function spawnRockTroll(chosenPath) {
   // Stone teeth
   [[0.12,1.30,0.36],[0,1.28,0.38],[-0.12,1.30,0.36]].forEach(([px,py,pz]) => {
     const t = mesh(box(0.08, 0.18, 0.08), M.catMetal); t.position.set(px, py, pz); g.add(t);
+  });
+  // Molten crystal growths bursting from the stone — reads as a glowing-core golem (additive)
+  [[0.66,1.26,0.12,0.13],[-0.62,1.16,0.14,0.11],[0.16,1.02,0.34,0.11],[-0.22,0.84,0.32,0.09],[0.40,0.66,0.30,0.08]].forEach(([cx,cy,cz,cs]) => {
+    const shard = mesh(box(cs, cs*1.7, cs), M.rockTrollEye); shard.position.set(cx, cy, cz); shard.rotation.z = cx * 0.35; shard.rotation.x = -0.2; g.add(shard);
   });
   _pushEnemy(g, 'rockTroll', legL, legR, body, head, 2.3, chosenPath, armL, armR);
 }
