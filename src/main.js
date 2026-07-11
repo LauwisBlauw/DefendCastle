@@ -3748,6 +3748,10 @@ function spawnSpider(chosenPath) {
     const eyeSz = ei < 2 ? 0.09 : 0.06;
     const eye = mesh(box(eyeSz,eyeSz,0.04), M.spiderEye); eye.position.set(x+0.20, y, z); g.add(eye);
   });
+  // Coarse bristles on the abdomen — makes it read as a hairy, creepy hunter (additive)
+  [[-0.22,0.50,0.12],[-0.30,0.47,-0.08],[-0.14,0.47,-0.06],[-0.36,0.40,0.08],[-0.10,0.42,0.14]].forEach(([bx,by,bz]) => {
+    const bristle = mesh(box(0.035, 0.13, 0.035), bMat); bristle.position.set(bx, by, bz); bristle.rotation.x = bz * 1.4; bristle.rotation.z = bx * 0.6; g.add(bristle);
+  });
   _pushEnemy(g, 'spider', null, null, cthorax, abdomen, 0.7, chosenPath);
 }
 
@@ -3796,6 +3800,12 @@ function spawnCyclops(chosenPath) {
   // Horns
   const hornL = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornL.position.set( 0.32, 2.42, 0); hornL.rotation.z =  0.35; g.add(hornL);
   const hornR = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornR.position.set(-0.32, 2.42, 0); hornR.rotation.z = -0.35; g.add(hornR);
+  // Ragged hide kilt + a bone bandolier of trophies slung across the chest (additive)
+  const kiltF = mesh(box(0.92, 0.44, 0.14), M.arcBelt);  kiltF.position.set(0, 0.60, 0.34); g.add(kiltF);
+  const kiltB = mesh(box(0.92, 0.44, 0.14), M.spLeather); kiltB.position.set(0, 0.60, -0.34); g.add(kiltB);
+  const belt  = mesh(box(1.00, 0.14, 0.86), M.spLeather); belt.position.set(0, 0.80, 0); g.add(belt);
+  const bandolier = mesh(box(0.16, 1.05, 0.10), M.spLeather); bandolier.position.set(0.06, 1.15, 0.46); bandolier.rotation.z = 0.5; g.add(bandolier);
+  [[0.34,1.42],[0.20,1.18],[0.06,0.94]].forEach(([bx,by]) => { const bone = mesh(box(0.11,0.11,0.07), M.orcTusk); bone.position.set(bx, by, 0.49); g.add(bone); });
   _pushEnemy(g, 'cyclops', legL, legR, body, head, 2.7, chosenPath, armL, armR);
 }
 
@@ -3860,6 +3870,10 @@ function spawnEnemyArcher(chosenPath) {
     const shaft = mesh(box(0.025,0.26,0.025), bMat);
     shaft.position.set(0.12 + ai*0.04, 1.0, -0.2); g.add(shaft);
   }
+  // Ragged torn strips at the cloak hem — sinister, weathered silhouette (additive)
+  [[-0.15,-0.06],[0,-0.10],[0.15,-0.05]].forEach(([tx,ty]) => {
+    const tatter = mesh(box(0.10, 0.16, 0.06), hMat); tatter.position.set(tx, ty, -0.21); g.add(tatter);
+  });
   _pushEnemy(g, 'enemyArcher', legL, legR, body, head, 1.65, chosenPath, armL, armR);
   orcs[orcs.length - 1].weapon = bowPivot;
 }
