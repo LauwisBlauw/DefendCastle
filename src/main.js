@@ -3559,6 +3559,10 @@ function spawnTroll(chosenPath) {
   // Tusks
   const tuskL = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskL.position.set( 0.14, 1.14, 0.30); tuskL.rotation.z = -0.18; g.add(tuskL);
   const tuskR = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskR.position.set(-0.14, 1.14, 0.30); tuskR.rotation.z = 0.18; g.add(tuskR);
+  // Bony back ridge — row of protruding spines down the spine (additive, rig-safe)
+  [[1.02, 0.28, -0.24], [0.82, 0.34, -0.26], [0.60, 0.28, -0.26]].forEach(([sy, sh, sz]) => {
+    const spine = mesh(box(0.12, sh, 0.12), M.orcTusk); spine.position.set(0, sy, sz); spine.rotation.x = -0.5; g.add(spine);
+  });
   _pushEnemy(g, 'troll', legL, legR, body, head, 1.95, chosenPath, armL, armR);
 }
 
@@ -3618,6 +3622,14 @@ function spawnSkeleton(chosenPath) {
   for (let ti = 0; ti < 4; ti++) {
     const tooth = mesh(box(0.04, 0.06, 0.04), bMat); tooth.position.set(-0.12 + ti * 0.08, 0.87, 0.17); g.add(tooth);
   }
+  // Rusted sword gripped in the right hand + a tattered burial shroud (additive)
+  const skGrip  = mesh(box(0.05, 0.16, 0.05), M.arcBelt); skGrip.position.set(-0.30, 0.42, 0.16); g.add(skGrip);
+  const skGuard = mesh(box(0.22, 0.04, 0.05), M.catMetal); skGuard.position.set(-0.30, 0.52, 0.16); g.add(skGuard);
+  const skBlade = mesh(box(0.06, 0.40, 0.03), M.weapon);   skBlade.position.set(-0.30, 0.76, 0.16); g.add(skBlade);
+  const skNick  = mesh(box(0.07, 0.05, 0.04), M.castleDark); skNick.position.set(-0.30, 0.70, 0.165); g.add(skNick); // chipped edge
+  const skTip   = mesh(box(0.04, 0.10, 0.02), M.weapon);   skTip.position.set(-0.30, 0.98, 0.16); g.add(skTip);
+  const shroud1 = mesh(box(0.36, 0.34, 0.05), M.arcHood);  shroud1.position.set(0.02, 0.72, -0.13); g.add(shroud1);
+  const shroud2 = mesh(box(0.18, 0.16, 0.05), M.arcHood);  shroud2.position.set(0.13, 0.50, -0.14); g.add(shroud2); // ragged tail
   _pushEnemy(g, 'skeleton', legL, legR, body, head, 1.55, chosenPath, armL, armR);
 }
 
@@ -3676,6 +3688,11 @@ function spawnWolf(chosenPath) {
     return lower; // return as animation proxy
   });
   const [legFL, legFR, legBL, legBR] = legMeshes;
+  // Spiked iron war-collar around the neck — marks this as a trained dire-wolf (additive)
+  const collar = mesh(box(0.36, 0.14, 0.36), M.arcBelt); collar.position.set(0.34, 0.46, 0); wi.add(collar);
+  [[0, 0.15], [0.15, 0], [0, -0.15], [-0.11, 0.10], [-0.11, -0.10]].forEach(([cx, cz]) => {
+    const stud = mesh(box(0.06, 0.11, 0.06), M.catMetal); stud.position.set(0.34 + cx, 0.52, cz); stud.rotation.x = cz * 1.5; wi.add(stud);
+  });
   _pushEnemy(g, 'wolf', legFL, legBR, body, head, 0.95, chosenPath);
   const w = orcs[orcs.length - 1];
   w.legFR = legFR; w.legBL = legBL;
