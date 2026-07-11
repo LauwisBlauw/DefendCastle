@@ -3891,6 +3891,11 @@ function spawnGenericOrc(orcType, chosenPath) {
     });
     // Crude leather loincloth flap
     const loin = mesh(box(0.28, 0.24, 0.08), M.arcBelt); loin.position.set(0, 0.42, 0.22); g.add(loin);
+    // Savage fur shoulder mantle + a bone trophy necklace (additive, rig-safe)
+    const mantle  = mesh(box(0.66, 0.16, 0.46), M.arcBelt);   mantle.position.set(0, 0.93, -0.02); g.add(mantle);
+    const mantleR = mesh(box(0.70, 0.10, 0.40), M.spLeather); mantleR.position.set(0, 0.86, -0.04); g.add(mantleR);
+    const boneNeck = mesh(box(0.34, 0.05, 0.09), M.orcTusk);  boneNeck.position.set(0, 0.84, 0.19); g.add(boneNeck);
+    [-0.10, 0, 0.10].forEach(bx => { const fang = mesh(box(0.04, 0.10, 0.04), M.orcTusk); fang.position.set(bx, 0.78, 0.20); g.add(fang); });
   }
 
   if (orcType === 'brute') {
@@ -3905,6 +3910,13 @@ function spawnGenericOrc(orcType, chosenPath) {
     const axeShaft = mesh(box(0.09, 0.72, 0.09), M.trollClub); axeShaft.position.set(-0.08, -0.34, 0.08); armR.add(axeShaft);
     const axeHeadT = mesh(box(0.38, 0.16, 0.09), M.catMetal); axeHeadT.position.set(-0.08,  0.04, 0.08); armR.add(axeHeadT);
     const axeHeadB = mesh(box(0.32, 0.14, 0.09), M.catMetal); axeHeadB.position.set(-0.08, -0.10, 0.08); armR.add(axeHeadB);
+    // Iron shoulder spikes + a ragged war-banner lashed to the back (additive)
+    [[0.43,0.10],[0.43,-0.10],[-0.43,0.10],[-0.43,-0.10]].forEach(([sx,sz]) => {
+      const spike = mesh(box(0.07, 0.20, 0.07), M.orcTusk); spike.position.set(sx, 1.02, sz); g.add(spike);
+    });
+    const bnPole  = mesh(box(0.05, 0.96, 0.05), M.trollClub); bnPole.position.set(0.30, 1.05, -0.22); g.add(bnPole);
+    const bnFlag  = mesh(box(0.04, 0.36, 0.34), M.bruteBody); bnFlag.position.set(0.30, 1.34, -0.40); g.add(bnFlag);
+    const bnSkull = mesh(box(0.10, 0.10, 0.08), M.orcTusk);   bnSkull.position.set(0.30, 1.56, -0.22); g.add(bnSkull); // skull finial
   }
 
   if (orcType === 'boss') {
@@ -3918,6 +3930,10 @@ function spawnGenericOrc(orcType, chosenPath) {
     const gsGuard = mesh(box(0.46, 0.09, 0.09), M.catMetal); gsGuard.position.set(-0.04, -0.14, 0.08); armR.add(gsGuard);
     const gsBlade = mesh(box(0.09, 0.72, 0.06), M.weapon); gsBlade.position.set(-0.04,  0.28, 0.08); armR.add(gsBlade);
     const gsTip   = mesh(box(0.06, 0.18, 0.04), M.weapon); gsTip.position.set(-0.04,  0.70, 0.08); armR.add(gsTip);
+    // Tattered warlord cape hanging from a gold gorget (additive, rig-safe)
+    const capeGorget = mesh(box(0.56, 0.10, 0.07), M.castleFlagPole); capeGorget.position.set(0, 0.96, -0.20); g.add(capeGorget);
+    const capeWarU   = mesh(box(0.54, 0.52, 0.05), M.bossBody);       capeWarU.position.set(0, 0.62, -0.245); g.add(capeWarU);
+    const capeWarL   = mesh(box(0.46, 0.26, 0.05), M.bossBody);       capeWarL.position.set(0, 0.27, -0.27); capeWarL.rotation.x = -0.05; g.add(capeWarL);
   }
 
   const headSize = orcType === 'boss' ? 0.50 : 0.44;
