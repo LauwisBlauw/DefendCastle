@@ -7454,6 +7454,14 @@ function buildCatapult(col, row) {
     const boulderSz = 0.12 + Math.abs(bx+bz) * 0.05;
     const boulder = mesh(box(boulderSz, boulderSz*0.85, boulderSz*0.9), M.rockMat); boulder.position.set(bx, by, bz); g.add(boulder);
   });
+  // Faction colours — a corner pennant mast + a gold-bossed shield hung on the
+  // chassis flank, matching the Azure & Gold treatment of the other defenders (additive)
+  const cpMast   = mesh(box(0.05, 0.80, 0.05), M.castleFlagPole); cpMast.position.set(-0.36, 0.62, 0.30); g.add(cpMast);
+  const cpFinial = mesh(box(0.07, 0.07, 0.07), M.swGold);         cpFinial.position.set(-0.36, 1.05, 0.30); g.add(cpFinial);
+  const cpFlag   = mesh(box(0.04, 0.22, 0.26), M.castleFlag);     cpFlag.position.set(-0.34, 0.90, 0.45); g.add(cpFlag);
+  const cpTrim   = mesh(box(0.045, 0.04, 0.28), M.swGold);        cpTrim.position.set(-0.34, 1.02, 0.45); g.add(cpTrim);
+  const cpShield = mesh(box(0.06, 0.30, 0.24), M.swShield);       cpShield.position.set(-0.46, 0.30, -0.10); g.add(cpShield);
+  const cpBoss   = mesh(box(0.07, 0.10, 0.10), M.swGold);         cpBoss.position.set(-0.48, 0.30, -0.10); g.add(cpBoss);
   const catHpBar = makeHPBar(g, 2.1);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
