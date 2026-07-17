@@ -12368,6 +12368,7 @@ function _stLayerRefreshUI() {
   if (!list) return;
   list.innerHTML = '';
   [..._stLayers].reverse().forEach(lay => {
+    const idx = _stLayers.indexOf(lay); // position in the REAL array (display list is reversed)
     const row = document.createElement('div');
     row.className = 'studio-layer-item' + (lay.id === _stActiveLayerId ? ' active' : '');
     row.dataset.id = lay.id;
