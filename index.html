@@ -2157,6 +2157,15 @@
     #me-path-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-bottom: 4px; }
     #me-tree-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-bottom: 4px; }
     #me-obj-grid  { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin-bottom: 4px; }
+    #me-custom-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 5px; margin-bottom: 4px; }
+    #me-custom-grid .me-tool-btn { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #studio-hotkey-legend {
+      margin-top: 8px; padding: 6px 8px;
+      font-size: 10px; line-height: 1.5; color: rgba(120,200,190,0.7);
+      background: rgba(0,40,36,0.35); border: 1px solid rgba(0,190,170,0.2);
+      border-radius: 7px; font-family: 'Nunito', sans-serif;
+    }
+    #studio-hotkey-legend b { color: #55eedd; }
     #me-prop-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin-bottom: 4px; }
     #me-biome-grid {
       display: grid; grid-template-columns: repeat(2,1fr); gap: 4px; margin-bottom: 10px;
@@ -2912,6 +2921,10 @@
         <select id="studio-part-layer-sel"></select>
       </div>
     </div>
+    <div id="studio-hotkey-legend">
+      <b>Keys</b> — arrows move · Shift+↑↓ raise/lower · Ctrl+D dupe ·
+      Del delete · Ctrl+Z/Y undo/redo · drag orbits · wheel zooms
+    </div>
   </div>
 
   <!-- STUDIO RIGHT PANEL — layers + library -->
@@ -3041,6 +3054,9 @@
       <button class="me-tool-btn" data-me-tool="well">⛲ Well</button>
       <button class="me-tool-btn erase" data-me-tool="erase">🗑 Erase</button>
     </div>
+
+    <div class="me-section-label" style="margin-top:6px">Custom (Studio builds)</div>
+    <div id="me-custom-grid"></div>
 
     <div class="me-section-label" style="margin-top:8px">Biome / Theme</div>
     <div id="me-biome-grid"></div>

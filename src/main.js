@@ -11958,6 +11958,29 @@ function _studioMakeGeometry(shape, w, h, d) {
   return _studioSnapGeometry(geo);
 }
 
+// ── Studio → game bridge ────────────────────────────────────────────────────
+// Rebuild a saved studio object as a self-contained group in the MAIN scene at
+// a map tile. Same parts recipe the studio Library saves; hidden layers are
+// skipped, matching what the author saw when saving.
+function buildStudioObjectGroup(data, col, row) {
+  const g = new THREE.Group();
+  const hiddenLayers = new Set((data.layers || []).filter(l => l.visible === false).map(l => l.id));
+  for (const pd of (data.parts || [])) {
+    if (pd.layerId && hiddenLayers.has(pd.layerId)) continue;
+    const m = new THREE.Mesh(
+      _studioMakeGeometry(pd.shape || 'box', pd.w, pd.h, pd.d),
+      _studioMakeMaterial(pd.color || 0x999999),
+    );
+    m.position.set(pd.x || 0, pd.y || 0, pd.z || 0);
+    m.rotation.set(pd.rx || 0, pd.ry || 0, pd.rz || 0);
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
+  }
+  g.position.set(col, 0, row);
+  scene.add(g);
+  return g;
+}
+
 function _studioInit() {
   if (_stScene) return; // already initialized
 
@@ -12517,7 +12540,7 @@ function _studioRefreshList() {
     const lb = document.createElement('button');
     lb.className = 'studio-obj-load' + (obj.name === studioLoadedName ? ' active' : '');
     lb.textContent = obj.name;
-    lb.title = `${obj.parts.length} part(s)`;
+    lb.title = `${obj.parts.length} part(s) · placeable in the Map Editor`;
     lb.addEventListener('click', () => { _studioLoad(obj); _studioRefreshList(); });
     const db = document.createElement('button');
     db.className = 'studio-obj-del';
@@ -12782,7 +12805,7 @@ document.querySelectorAll('.world-filter').forEach(b =>
 // ─────────────────────────────────────────────
 //  UNIT LAB MODE
 // ─────────────────────────────────────────────
-const _UNIT_DEF_TYPES = ['wall','tower','catapult','archer','swordsman','knight','spearman','mage','ballista'];
+const _UNIT_DEF_TYPES = ['wall','tower','catapult','archer','swordsman','knight','spearman','mage','ballista','spiketrap'];
 const _UNIT_ORC_KEYS  = Object.keys(CFG.ORC_TYPES);
 
 const _DEF_STAT_CFG = {
@@ -12818,7 +12841,10 @@ function _unitLabInitButtons() {
   _UNIT_ORC_KEYS.forEach(t => {
     const b = document.createElement('button');
     b.className = 'unit-type-btn'; b.dataset.utype = t; b.dataset.ucat = 'enemy';
-    b.textContent = t.slice(0,7);
+    // Readable label from the camelCase key ("enemyArcher" -> "Enemy Archer")
+    const nice = t.replace(/([A-Z])/g, ' $1');
+    b.textContent = nice.charAt(0).toUpperCase() + nice.slice(1);
+    b.title = b.textContent;
     b.addEventListener('click', () => _unitLabSelect(t, 'enemy'));
     orcGrid.appendChild(b);
   });
@@ -12939,6 +12965,10 @@ function _unitPreviewInit() {
 
   // Very dim ambient — keeps edges dark
   _unitPreviewScene.add(new THREE.AmbientLight(0x0a1a2a, 0.6));
+  // Hemisphere fallback: guarantees the model is never pure black even when the
+  // spotlight/shadow path degrades (software GL, weak GPUs). Dim enough that the
+  // spotlight still dominates the look on real hardware.
+  _unitPreviewScene.add(new THREE.HemisphereLight(0x33465e, 0x141a22, 1.1));
 
   // Main warm spotlight from above-front — the "cutoff room" beam
   const spot = new THREE.SpotLight(0xfff3d0, 6.0, 14, Math.PI / 9, 0.3, 1.4);
@@ -13159,6 +13189,10 @@ function _meBuildGhost(tool) {
   } else if (tool === 'well') {
     addBox(0.72, 0.43, 0.72, 0, 0.215, 0);
     addBox(0.62, 0.07, 0.62, 0, 0.89, 0);
+  } else if (tool && tool.startsWith('custom:')) {
+    // Studio object: generic crate silhouette (actual footprint varies per build)
+    addBox(0.9, 0.9, 0.9, 0, 0.45, 0);
+    addBox(0.5, 0.3, 0.5, 0, 1.05, 0);
   }
   return g;
 }
@@ -13195,6 +13229,16 @@ const ME_TILE_TOOLS = {
   pathB:  { mat: () => M.mePathB,  type: 'path',  pathIdx: 1 },
   pathC:  { mat: () => M.mePathC,  type: 'path',  pathIdx: 2 },
 };
+
+// Studio-object defs embedded in the currently loaded map (name -> recipe).
+// Makes saved maps self-contained: they render even if the studio library
+// entry was deleted, and survive export/import to another browser.
+let _meCustomDefs = {};
+function _meGetStudioObject(name) {
+  const lib = loadSave('td_studio_objects', null);
+  const fromLib = Array.isArray(lib) ? lib.find(o => o.name === name) : null;
+  return fromLib || _meCustomDefs[name] || null;
+}
 
 // Apply the active tool across the brush footprint. Brush >1 applies only to
 // plain tile tools and erase — paths need deliberate single-tile routing, and
@@ -13330,6 +13374,15 @@ function _mePlaceAt(col, row) {
     staticObstacles.push({ x: col, z: row, r: 0.18 });
   }
   else if (_meActiveTool === 'well') group = buildWell(col, row, _meSeededRng(seed));
+  else if (_meActiveTool.startsWith('custom:')) {
+    // Studio-built object placed as a map prop
+    const objName = _meActiveTool.slice(7);
+    const objData = _meGetStudioObject(objName);
+    if (!objData) { showTooltip(`Studio object "${objName}" not found — rebuild it in the Studio`, 2200); return; }
+    group = buildStudioObjectGroup(objData, col, row);
+    staticObstacles.push({ x: col, z: row, r: 0.4 });
+    if (cell.type === 'grass') cell.type = 'scenery';
+  }
 
   if (group) {
     group.userData.meItem = true;
@@ -13626,6 +13679,16 @@ function _meSaveMap(name) {
     }),
     paths: _mePaths.map(p => p.map(([c,r]) => [c,r])),
   };
+  // Embed the recipes for any studio objects this map uses, so the map file is
+  // self-contained (shareable via export, robust to library deletions)
+  const usedCustom = [...new Set(_meItems.filter(i => i.type.startsWith('custom:')).map(i => i.type.slice(7)))];
+  if (usedCustom.length) {
+    data.customDefs = {};
+    for (const n of usedCustom) {
+      const d = _meGetStudioObject(n);
+      if (d) data.customDefs[n] = { name: d.name, layers: d.layers, parts: d.parts };
+    }
+  }
   const existing = _meSavedMaps.findIndex(m => m.name === data.name);
   if (existing !== -1) _meSavedMaps[existing] = data;
   else _meSavedMaps.push(data);
@@ -13636,6 +13699,7 @@ function _meSaveMap(name) {
 
 function _meLoadMap(data) {
   _meClearAll();
+  _meCustomDefs = data.customDefs || {};
   if (data.biome >= 0) {
     activeBiomeIdx = -1;
     applyBiome(data.biome);
@@ -13696,6 +13760,14 @@ function _meLoadMap(data) {
       staticObstacles.push({ x: item.col, z: item.row, r: 0.18 });
     }
     else if (item.type === 'well') group = buildWell(item.col, item.row, _meSeededRng(item.seed));
+    else if (item.type && item.type.startsWith('custom:')) {
+      const objData = _meGetStudioObject(item.type.slice(7));
+      if (objData) {
+        group = buildStudioObjectGroup(objData, item.col, item.row);
+        staticObstacles.push({ x: item.col, z: item.row, r: 0.4 });
+        if (cell.type === 'grass') cell.type = 'scenery';
+      }
+    }
     if (group) { group.userData.meItem = true; _meItems.push({ ...item, group }); }
   }
   // Rebuild path lanterns (Clear All removed them)
@@ -13767,6 +13839,25 @@ function enterMapEditorMode() {
   const _sm = loadSave('td_saved_maps', null);
   if (Array.isArray(_sm)) _meSavedMaps = _sm;
   _meRefreshMapList();
+  // Custom (studio-built) object tools — rebuilt each entry, library may have changed
+  const customGrid = document.getElementById('me-custom-grid');
+  if (customGrid) {
+    customGrid.innerHTML = '';
+    const lib = loadSave('td_studio_objects', null);
+    if (!Array.isArray(lib) || !lib.length) {
+      customGrid.innerHTML = '<div style="font-size:10px;color:rgba(0,180,220,0.45);padding:2px 0;line-height:1.4">Build objects in the Studio (ESC menu) — they become placeable here</div>';
+    } else {
+      lib.forEach(o => {
+        const btn = document.createElement('button');
+        btn.className = 'me-tool-btn';
+        btn.dataset.meTool = 'custom:' + o.name;
+        btn.textContent = '📦 ' + o.name;
+        btn.title = `${o.parts?.length ?? 0} part(s) — built in Studio`;
+        btn.addEventListener('click', () => _meSetTool('custom:' + o.name));
+        customGrid.appendChild(btn);
+      });
+    }
+  }
   // Biome buttons
   const biomeGrid = document.getElementById('me-biome-grid');
   if (!biomeGrid.children.length) {
@@ -16381,6 +16472,10 @@ loadDifficulty();
   const skipMenu = urlParams.has('test') || urlParams.has('studio') || urlParams.has('map') || urlParams.has('nomenu') || urlParams.has('headless');
   if (skipMenu) {
     showTooltip('3 roads! Place Walls on roads to block enemies — they\'ll fight through!', 6000);
+    // ?studio / ?map / ?test previously only skipped the menu — actually enter the mode
+    if      (urlParams.has('studio')) window._switchToMode('studio');
+    else if (urlParams.has('map'))    window._switchToMode('map');
+    else if (urlParams.has('test'))   window._switchToMode('test');
   } else {
     showLevelSelect();
   }
