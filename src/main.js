@@ -11258,10 +11258,21 @@ function gameLoop() {
   if (selectedDef && _defPanel.style.display !== 'none') _updateDefPanelPos();
 
   controls.update();
-  if (!HEADLESS || performance.now() - _lastHeadlessRenderMs > 1000) {
-    _lastHeadlessRenderMs = performance.now();
+  // Headless: never render while a TEST battle is in flight — cold software-GL
+  // renders can block for multiple seconds (shader compilation), starving the
+  // logic loop and making first-after-load battles time out at a tenth speed.
+  const _headlessSkip = HEADLESS &&
+    (window._battleWatcher || performance.now() - _lastHeadlessRenderMs <= 1000);
+  if (!_headlessSkip) {
     if (bloomEnabled) composer.render();
     else renderer.render(scene, camera);
+    // Stamp AFTER the render returns: on a cold page a software-GL render can
+    // take >1s (shader compilation), and stamping before it meant the 1s gate
+    // was already elapsed by the next frame — so EVERY frame rendered and the
+    // logic loop crawled at ~1-2Hz. That was the "first battle after load
+    // stalls/times out" bug: enemies moved at a tenth speed until shaders
+    // warmed. Stamping after guarantees ≥1s of unblocked logic between frames.
+    _lastHeadlessRenderMs = performance.now();
   }
 }
 
@@ -14114,9 +14125,14 @@ function _spawnArenaEnemy(type, col) {
   PATHS[0] = saved[0]; PATHS[1] = saved[1]; PATHS[2] = saved[2];
   const o = orcs[orcs.length - 1];
   if (!o) return;
-  o.pathIndex = 0;
+  // Stagger for real: arena lanes are straight 1-tile steps (path index ==
+  // column), so aligning pathIndex to the requested column actually places the
+  // enemy there. The old teleport (position.x = col with pathIndex 0) was
+  // undone one frame later by the path-interpolation snap, so every enemy
+  // silently started at column 0 regardless of the requested stagger.
+  o.pathIndex = Math.max(0, Math.min(lanePath.length - 2, Math.round(col)));
   o.progress  = 0;
-  o.group.position.x = col;
+  o.group.position.x = lanePath[o.pathIndex][0];
   o.group.position.z = laneRow;
 }
 
