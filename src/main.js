@@ -14552,6 +14552,8 @@ function _cmpOutcome(a, b) {
   document.getElementById('bal-run-btn')?.addEventListener('click', () => _runBalanceCheck());
 
   // ── Stat Tweaker controls ─────────────────────────────────────────────────
+  _ensureOrigCFG();
+  _applySavedTweaks();
   _buildStatTweaker();
 
   const _tweakerBody   = document.getElementById('tweaker-body');
@@ -14583,6 +14585,7 @@ function _cmpOutcome(a, b) {
         if (typeof CFG.ORC_TYPES[type]?.[k] === 'number') CFG.ORC_TYPES[type][k] = v;
       }
     }
+    try { localStorage.removeItem('td_stat_tweaks'); } catch {} // clear persisted tweaks too
     _buildStatTweaker();
     showTooltip('Stats reset to defaults', 1500);
   });
@@ -14964,6 +14967,41 @@ function _cmpOutcome(a, b) {
     };
   }
 
+  // ── Tweak persistence: only the DIFFS vs the shipped defaults are stored,
+  // so a game-balance update in a new build wins wherever the player didn't
+  // explicitly tweak that exact stat.
+  function _saveTweaks() {
+    if (!_origCFG) return;
+    const diff = { STATS: {}, ORC_TYPES: {} };
+    for (const [grp, cfg, orig] of [['STATS', CFG.STATS, _origCFG.STATS], ['ORC_TYPES', CFG.ORC_TYPES, _origCFG.ORC_TYPES]]) {
+      for (const [type, stats] of Object.entries(cfg)) {
+        for (const [k, v] of Object.entries(stats)) {
+          if (typeof v === 'number' && typeof orig[type]?.[k] === 'number' && Math.abs(v - orig[type][k]) > 0.0001) {
+            (diff[grp][type] = diff[grp][type] || {})[k] = v;
+          }
+        }
+      }
+    }
+    if (!Object.keys(diff.STATS).length && !Object.keys(diff.ORC_TYPES).length) {
+      try { localStorage.removeItem('td_stat_tweaks'); } catch {}
+    } else {
+      saveSave('td_stat_tweaks', diff);
+    }
+  }
+  function _applySavedTweaks() {
+    const t = loadSave('td_stat_tweaks', null);
+    if (!t) return;
+    let applied = 0;
+    for (const [grp, cfg] of [['STATS', CFG.STATS], ['ORC_TYPES', CFG.ORC_TYPES]]) {
+      for (const [type, stats] of Object.entries(t[grp] || {})) {
+        for (const [k, v] of Object.entries(stats)) {
+          if (typeof cfg[type]?.[k] === 'number' && typeof v === 'number') { cfg[type][k] = v; applied++; }
+        }
+      }
+    }
+    if (applied) showTooltip(`🔧 ${applied} saved stat tweak${applied > 1 ? 's' : ''} applied (Test Arena → Reset to clear)`, 3500);
+  }
+
   /** Build/rebuild the stat tweaker panel from current CFG values */
   function _buildStatTweaker() {
     _ensureOrigCFG();
@@ -15026,6 +15064,7 @@ function _cmpOutcome(a, b) {
           }
         }
         refresh();
+        _saveTweaks(); // persist so balance experiments survive reloads
       }
       minus.addEventListener('click', () => adjust(-step));
       plus.addEventListener('click',  () => adjust( step));
