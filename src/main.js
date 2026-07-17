@@ -13407,13 +13407,13 @@ function _meValidatePaths() {
     any = true;
     const tiles = _meOrderPathTiles(_mePaths[pi]);
     const L = laneNames[pi];
-    if (tiles.length < 8) warnings.push(`Path ${L} is very short (${tiles.length} tiles)`);
+    if (tiles.length < 8) warnings.push(`Path ${L} is very short (${tiles.length} tile${tiles.length === 1 ? '' : 's'})`);
     let gaps = 0;
     for (let i = 1; i < tiles.length; i++) {
       const d = Math.max(Math.abs(tiles[i][0] - tiles[i-1][0]), Math.abs(tiles[i][1] - tiles[i-1][1]));
       if (d > 1) gaps++;
     }
-    if (gaps) warnings.push(`Path ${L} has ${gaps} gap${gaps > 1 ? 's' : ''} — enemies will jump them`);
+    if (gaps) warnings.push(`Path ${L} has ${gaps} gap${gaps > 1 ? 's' : ''} — enemies will jump ${gaps > 1 ? 'them' : 'it'}`);
     if (tiles[0][0] > 4) warnings.push(`Path ${L} doesn't start at the left (spawn) edge`);
     if (tiles[tiles.length - 1][0] < 58) warnings.push(`Path ${L} doesn't reach the castle side`);
   }
@@ -14997,7 +14997,25 @@ function _cmpOutcome(a, b) {
 
   // Dev hook: expose core render objects so the headless test harness can drive
   // the camera for close-up model inspection (companion to window.TEST).
-  window._DEV = { scene, camera, controls, THREE, get orcs() { return orcs; }, get defenders() { return defenders; } };
+  window._DEV = {
+    scene, camera, controls, THREE,
+    get orcs() { return orcs; },
+    get defenders() { return defenders; },
+    // Map-editor internals for automated editor testing
+    me: {
+      setTool: _meSetTool,
+      apply: _meApplyTool,
+      undo: _meUndo,
+      redo: _meRedo,
+      validate: _meValidatePaths,
+      order: _meOrderPathTiles,
+      setBrush: (n) => { _meBrushSize = n; },
+      get paths() { return _mePaths; },
+      get gamePaths() { return PATHS; },
+      get overrides() { return _meTileOverrides; },
+      get items() { return _meItems; },
+    },
+  };
 
   // Expose global TEST API for browser console and terminal-driven scripts
   window.TEST = {
