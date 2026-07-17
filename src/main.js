@@ -8078,6 +8078,7 @@ function place(tool, col, row) {
     return;
   }
   if (!testMode) gold -= cost;
+  if (!testMode) _runStats.defendersBuilt++;
   occupied.add(key);
 
   if      (tool === 'wall')      buildWall(col, row);
@@ -8405,6 +8406,7 @@ function dealDamage(orc, dmg, attacker = null) {
       if (waveDefDeaths === 0) _unlockAchievement('flawlessBoss');
     }
     gold += orc.reward;
+    _runStats.goldEarned += orc.reward;
     SND.goldGain();  // throttled — coin tinkle on reward
     window._testOnEnemyKilled?.(orc);
     updateHUD();
@@ -8472,6 +8474,7 @@ function dealDamage(orc, dmg, attacker = null) {
     if (streakCount >= 5) {
       const bonus = 5 + streakCount;
       gold += bonus;
+      _runStats.goldEarned += bonus;
       spawnGoldPopup(bonus, posAbove(orc.group.position, 2.1));
       if (streakCount % 5 === 0) showTooltip(`🔥 ${streakCount} KILL STREAK! +${bonus}🟡`, 1500);
     }
@@ -9685,6 +9688,18 @@ function checkWaveEnd() {
   }
   SND.waveComplete();
 
+  // Clutch save: clearing the wave DURING Last Stand ends the countdown with a
+  // celebration instead of silently letting the timer run out mid-breather.
+  if (lastStandActive) {
+    lastStandActive = false;
+    lastStandTimer = 0;
+    elLastStand?.classList.remove('active');
+    elLastStandTimer?.classList.remove('active');
+    castleHp = Math.max(castleHp, Math.floor(CFG.CASTLE_MAX_HP * 0.1)); // survive with 10% HP
+    updateCastleHPBar(); updateCastleHPMesh();
+    showTooltip('🛡️ LAST STAND HELD! The castle endures — 10% HP restored', 3500);
+  }
+
   // Feature 3: star rating — 3 independent criteria
   const starNoDmg   = castleHp >= waveStartHp;                               // castle took 0 damage
   const starNoLoss  = waveDefDeaths === 0;                                    // no defenders lost
@@ -9716,6 +9731,7 @@ function checkWaveEnd() {
   let bonus = 20 + wave * 10;
   if (doubleBonusWave) { bonus *= 2; doubleBonusWave = false; }
   gold += bonus;
+  _runStats.goldEarned += bonus;
 
   // ── Endless mode: milestone bonuses every 5 waves ──
   // Gives the player a satisfying compound reward as they push deeper into endless,
@@ -9786,12 +9802,17 @@ function checkWaveEnd() {
     return;
   }
 
-  // Feature 6: merchant every 3rd wave (not siege waves).
-  // Skip merchant inside levels (only 3 waves each — merchant fires mid-level breaks but
-  // would collide with Level Complete on the last wave; check above already returned for that).
+  // Feature 6: merchant.
+  // Endless/free play: every 3rd wave (not siege waves). Story levels: before the
+  // final wave of each level — the old `wave % 3` rule NEVER fired in story mode
+  // because every level's endWave is a multiple of 3, so the merchant was
+  // accidentally endless-only.
   const inLevel = currentLevel && currentLevel.id !== 'endless';
   const isLastOfLevel = inLevel && wave >= currentLevel.endWave;
-  if (wave % 3 === 0 && wave % 5 !== 0 && !isLastOfLevel) {
+  const merchantDue = inLevel
+    ? (wave === currentLevel.endWave - 1)             // story: breather before the boss wave
+    : (wave % 3 === 0 && wave % 5 !== 0);             // endless/free play: unchanged cadence
+  if (merchantDue && !isLastOfLevel) {
     showMerchant();
   } else {
     document.getElementById('btn-start').disabled = false;
@@ -10482,11 +10503,18 @@ function recordLevelResult(id, stars) {
 // ─────────────────────────────────────────────
 // Reset all per-run game state (called when starting a new level or retrying).
 // Does NOT reload the page — preserves level progress, settings, unlocks.
+// Per-run counters for the game-over summary. Reset with the run; incremented
+// at the kill-reward, wave-bonus, and defender-placement sites.
+const _runStats = { goldEarned: 0, defendersBuilt: 0, startMs: 0 };
+
 function _resetRunState() {
   gameOver = false;
   waveActive = false;
   castleHp = CFG.CASTLE_MAX_HP;
   kills = 0;
+  _runStats.goldEarned = 0;
+  _runStats.defendersBuilt = 0;
+  _runStats.startMs = Date.now();
   totalStars = 0;
   levelStarsEarned = 0;
   levelWaveStars.length = 0;
@@ -10906,6 +10934,19 @@ function triggerGameOver() {
     ? `Endless • ${DIFFICULTY_PRESETS[currentDifficulty].label}`
     : (currentLevel ? `${currentLevel.name} • ${DIFFICULTY_PRESETS[currentDifficulty].label}` : `${DIFFICULTY_PRESETS[currentDifficulty].label}`);
   if (elGoStats) elGoStats.textContent = `${modeLabel}  •  Wave ${wave} • ${kills} kills • ${CFG.CASTLE_MAX_HP - castleHp} damage taken`;
+  // Run summary — the reward-loop recap a long run deserves
+  const elGoSummary = document.getElementById('go-summary');
+  if (elGoSummary) {
+    const mins = Math.max(0, Math.floor((Date.now() - (_runStats.startMs || Date.now())) / 60000));
+    const secs = Math.max(0, Math.floor((Date.now() - (_runStats.startMs || Date.now())) / 1000) % 60);
+    elGoSummary.innerHTML =
+      `<span>🟡 ${_runStats.goldEarned} gold earned</span>` +
+      `<span>🛡️ ${_runStats.defendersBuilt} defenders built</span>` +
+      `<span>⏱ ${mins}:${String(secs).padStart(2, '0')} survived</span>`;
+  }
+  // Retry label: "Retry Level" only makes sense in story mode
+  const goRetry = document.getElementById('btn-retry');
+  if (goRetry) goRetry.textContent = currentLevel && currentLevel.id !== 'endless' ? '🔄 Retry Level' : '🔄 New Run';
   // Feature 3: show total stars
   const elGoStarsEl = document.getElementById('go-stars');
   if (elGoStarsEl) elGoStarsEl.textContent = `Stars earned: ${totalStars} ⭐`;
@@ -16146,17 +16187,25 @@ document.getElementById('esc-test').addEventListener('click', () => {
 });
 
 // ── DIFFICULTY MODE ───────────────────────────────────────────────────
+// Routes through the SAME path as the level-select pill (currentDifficulty +
+// applyDifficulty + saveDifficulty). The old handler set stale hardcoded
+// multipliers directly, skipped rewardMult/persistence/HUD, and desynced the
+// difficulty that records (best times, endless bests) are keyed under.
 document.querySelectorAll('.diff-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
     const d = btn.dataset.diff;
-    if (d === 'easy')   { difficultyMult = { hp: 0.7, speed: 0.85 }; showTooltip('Easy mode — enemies are weaker', 2000); }
-    else if (d === 'hard') { difficultyMult = { hp: 1.4, speed: 1.2 };  showTooltip('Hard mode — enemies are tougher & faster!', 2000); }
-    else                { difficultyMult = { hp: 1.0, speed: 1.0 };  showTooltip('Normal mode', 1500); }
+    if (!DIFFICULTY_PRESETS[d]) return;
+    currentDifficulty = d;
+    applyDifficulty();
+    saveDifficulty();
+    document.querySelectorAll('.diff-btn').forEach(b => b.classList.toggle('active', b.dataset.diff === d));
+    const p = DIFFICULTY_PRESETS[d];
+    showTooltip(`${p.icon} ${p.label} mode — applies to newly spawned enemies`, 2000);
     _closeEscMenu();
   });
 });
+// Keep the esc-menu buttons in sync with the persisted difficulty at load
+document.querySelectorAll('.diff-btn').forEach(b => b.classList.toggle('active', b.dataset.diff === currentDifficulty));
 
 // ── SETTINGS (volume sliders) ─────────────────────────────────────────
 (function _initSettings() {

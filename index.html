@@ -555,6 +555,11 @@
       font-family: 'Nunito', sans-serif;
       font-weight: 900;
     }
+    #go-summary {
+      display: flex; gap: 18px; justify-content: center; flex-wrap: wrap;
+      margin: 8px 0 4px; font-size: 13px; color: #cdd9ea;
+      font-family: 'Nunito', sans-serif; font-weight: 800;
+    }
     #go-stars {
       font-size: 24px;
       letter-spacing: 0.12em;
@@ -2734,8 +2739,9 @@
   <!-- GAME OVER OVERLAY -->
   <div id="game-over" role="dialog" aria-modal="true" aria-labelledby="go-title">
     <h1 id="go-title">GAME OVER</h1>
-    <p class="go-sub">Oops! Your castle fell down! 😅</p>
+    <p class="go-sub">The castle has fallen — the realm remembers its defenders.</p>
     <p class="go-stats" id="go-stats"></p>
+    <div id="go-summary"></div>
     <p id="go-highscore"></p>
     <p id="go-stars"></p>
     <div id="go-btn-row">
