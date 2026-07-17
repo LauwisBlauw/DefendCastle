@@ -491,6 +491,7 @@ const _UNIT_ORC_DEFAULTS = JSON.parse(JSON.stringify(CFG.ORC_TYPES));
 
 let mapEditorMode   = false;
 let _meActiveTool   = 'tree';
+let _meBrushSize    = 1;            // 1/2/3 — square brush for plain tile tools + erase
 let _meItems        = [];           // [{type, col, row, scale, seed, group}]
 let _meTileOverrides = {};          // key `col,row` -> { origMat, origType, newType }
 let _mePaths        = [[], [], []]; // ordered [col,row] per path A/B/C (index 0/1/2)
@@ -498,10 +499,14 @@ let _mePathTiles    = [{}, {}, {}]; // quick lookup: key->`col,row` per path ind
 let _meSavedMaps    = [];
 let _meLoadedName   = null;
 let _meHoverMesh    = null;
-// Undo stack — each entry is a closure that reverses ONE editor action.
-// Capped at 50 to bound memory; older actions just fall off the bottom.
+// Undo/redo stacks — each entry is { undo, redo }: paired closures that reverse
+// or re-apply ONE editor action. Capped at 50 to bound memory.
 let _meUndoStack    = [];
+let _meRedoStack    = [];
 const _ME_UNDO_LIMIT = 50;
+// While true, a redo is replaying an action — _mePushUndo becomes a no-op so
+// the replay doesn't record itself as a brand-new action.
+let _meReplaying = false;
 // Batching: while a drag-stroke is in progress (between mousedown and mouseup),
 // individual tile actions accumulate into _meUndoBatch instead of pushing directly.
 // One Ctrl+Z then reverses the WHOLE stroke, which is what players expect.
@@ -513,23 +518,41 @@ function _meEndUndoBatch() {
   _meUndoBatch = null;
   if (batch.length === 0) return;
   if (batch.length === 1) { _mePushUndoRaw(batch[0]); return; }
-  // Collapse N closures into one — reverse order so the LAST action undoes first.
-  _mePushUndoRaw(() => { for (let i = batch.length - 1; i >= 0; i--) batch[i](); });
+  // Collapse N entries into one — undo runs in reverse order, redo re-applies forward.
+  _mePushUndoRaw({
+    undo: () => { for (let i = batch.length - 1; i >= 0; i--) batch[i].undo(); },
+    redo: () => { for (let i = 0; i < batch.length; i++) batch[i].redo(); },
+  });
 }
-function _mePushUndoRaw(undoFn) {
-  _meUndoStack.push(undoFn);
+function _mePushUndoRaw(entry) {
+  _meUndoStack.push(entry);
   if (_meUndoStack.length > _ME_UNDO_LIMIT) _meUndoStack.shift();
+  _meRedoStack.length = 0; // a fresh action invalidates the redo branch
 }
-function _mePushUndo(undoFn) {
+function _mePushUndo(undoFn, redoFn) {
+  if (_meReplaying) return; // redo replays must not re-record themselves
+  const entry = { undo: undoFn, redo: redoFn || (() => {}) };
   // If a batch is open, accumulate. Otherwise push directly (single-click actions).
-  if (_meUndoBatch) _meUndoBatch.push(undoFn);
-  else _mePushUndoRaw(undoFn);
+  if (_meUndoBatch) _meUndoBatch.push(entry);
+  else _mePushUndoRaw(entry);
 }
 function _meUndo() {
-  const fn = _meUndoStack.pop();
-  if (!fn) { showTooltip('Nothing to undo', 1200); return; }
-  try { fn(); } catch (err) { console.warn('undo failed:', err); }
-  showTooltip(`Undo (${_meUndoStack.length} left)`, 900);
+  const entry = _meUndoStack.pop();
+  if (!entry) { showTooltip('Nothing to undo', 1200); return; }
+  try { entry.undo(); } catch (err) { console.warn('undo failed:', err); }
+  _meRedoStack.push(entry);
+  showTooltip(`Undo (${_meUndoStack.length} left · Ctrl+Y = redo)`, 900);
+}
+function _meRedo() {
+  const entry = _meRedoStack.pop();
+  if (!entry) { showTooltip('Nothing to redo', 1200); return; }
+  _meReplaying = true;
+  try { entry.redo(); } catch (err) { console.warn('redo failed:', err); }
+  finally { _meReplaying = false; }
+  // Back onto the undo stack directly — must NOT clear the remaining redo branch
+  _meUndoStack.push(entry);
+  if (_meUndoStack.length > _ME_UNDO_LIMIT) _meUndoStack.shift();
+  showTooltip(`Redo (${_meRedoStack.length} left)`, 900);
 }
 
 // Feature 4: unlock system
@@ -11235,8 +11258,8 @@ canvas.addEventListener('mousemove', (e) => {
         _mePaintLastKey = dragKey;
         // Skip the first tile — the initial click/right-click handler already placed/erased it.
         if (_meDragStarted) {
-          if (e.buttons === 2) _meEraseAt(tile.col, tile.row);
-          else                 _mePlaceAt(tile.col, tile.row);
+          if (e.buttons === 2) _meApplyTool(tile.col, tile.row, true);
+          else                 _meApplyTool(tile.col, tile.row);
         } else {
           _meDragStarted = true;
         }
@@ -11272,7 +11295,7 @@ canvas.addEventListener('click', (e) => {
   if (studioMode && studioTab === 'world') { _worldPickObject(e.clientX, e.clientY); return; }
   if (mapEditorMode) {
     const tile = _rayToTile(e.clientX, e.clientY);
-    if (tile) _mePlaceAt(tile.col, tile.row);
+    if (tile) _meApplyTool(tile.col, tile.row);
     return;
   }
   if (testMode && selectedEnemyType) {
@@ -11521,6 +11544,10 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault(); _meUndo(); return;
   }
+  // Ctrl+Y / Ctrl+Shift+Z → redo
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y' || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+    e.preventDefault(); _meRedo(); return;
+  }
   // Single-key tool picks: G/D/S/W/L for tile types, T for tree, R for rock,
   // E for erase, P for play test
   if (e.ctrlKey || e.altKey || e.metaKey) return;
@@ -11548,7 +11575,7 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   if (mapEditorMode) {
     const tile = _rayToTile(e.clientX, e.clientY);
-    if (tile) _meEraseAt(tile.col, tile.row);
+    if (tile) _meApplyTool(tile.col, tile.row, true);
     return;
   }
   if (selectedTool) {
@@ -13168,6 +13195,26 @@ const ME_TILE_TOOLS = {
   pathC:  { mat: () => M.mePathC,  type: 'path',  pathIdx: 2 },
 };
 
+// Apply the active tool across the brush footprint. Brush >1 applies only to
+// plain tile tools and erase — paths need deliberate single-tile routing, and
+// objects would collide with their own footprints.
+function _meApplyTool(col, row, forceErase = false) {
+  const erase = forceErase || _meActiveTool === 'erase';
+  const td = ME_TILE_TOOLS[_meActiveTool];
+  const brushable = erase || (td && td.pathIdx === undefined);
+  const size = brushable ? _meBrushSize : 1;
+  const apply = erase ? _meEraseAt : _mePlaceAt;
+  if (size === 1) { apply(col, row); return; }
+  const o0 = -Math.floor((size - 1) / 2);
+  // Single click with a wide brush: batch the stamp so one Ctrl+Z reverses it all
+  const ownBatch = !_meUndoBatch;
+  if (ownBatch) _meBeginUndoBatch();
+  for (let dc = 0; dc < size; dc++) {
+    for (let dr = 0; dr < size; dr++) apply(col + o0 + dc, row + o0 + dr);
+  }
+  if (ownBatch) _meEndUndoBatch();
+}
+
 function _mePlaceAt(col, row) {
   if (_meActiveTool === 'erase') { _meEraseAt(col, row); return; }
 
@@ -13200,16 +13247,27 @@ function _mePlaceAt(col, row) {
     cell.mesh.material = td.mat();
     cell.type = td.type;
     _meTileOverrides[key].newType = _meActiveTool;
-    // For path tools, track ordered path tiles
+    // A tile belongs to at most ONE lane: painting lane B (or a plain tile) over
+    // an A tile removes it from A — previously it lingered in both path arrays.
+    const removedFromLanes = [];
+    for (let pi2 = 0; pi2 < 3; pi2++) {
+      if (pi2 !== td.pathIdx && _mePathTiles[pi2][key]) {
+        delete _mePathTiles[pi2][key];
+        _mePaths[pi2] = _mePaths[pi2].filter(([c,r]) => !(c===col && r===row));
+        removedFromLanes.push(pi2);
+      }
+    }
+    // For path tools, track path tile membership
     if (td.pathIdx !== undefined) {
       const pi = td.pathIdx;
       if (!_mePathTiles[pi][key]) {
         _mePathTiles[pi][key] = true;
         _mePaths[pi].push([col, row]);
       }
-      // Update PATHS and PATH_SET so enemies walk on these
-      _meRebuildPaths();
     }
+    // Update PATHS and PATH_SET so enemies walk on these
+    if (td.pathIdx !== undefined || removedFromLanes.length) _meRebuildPaths();
+    const paintedTool = _meActiveTool;
     _mePushUndo(() => {
       // Reverse: restore old material/type, restore object, fix path arrays
       cell.mesh.material = prevMat;
@@ -13220,9 +13278,19 @@ function _mePlaceAt(col, row) {
       if (td.pathIdx !== undefined && !prevPath.includes(td.pathIdx)) {
         delete _mePathTiles[td.pathIdx][key];
         _mePaths[td.pathIdx] = _mePaths[td.pathIdx].filter(([c,r]) => !(c===col && r===row));
-        _meRebuildPaths();
       }
+      // Restore membership in lanes this paint evicted the tile from
+      for (const pi2 of removedFromLanes) {
+        if (!_mePathTiles[pi2][key]) { _mePathTiles[pi2][key] = true; _mePaths[pi2].push([col, row]); }
+      }
+      _meRebuildPaths();
       if (erasedObj) _meRestoreObject(erasedObj);
+    }, () => {
+      // Redo: re-run the same paint with the original tool (guarded by _meReplaying,
+      // so the replay records no new undo entry)
+      const t0 = _meActiveTool;
+      _meActiveTool = paintedTool;
+      try { _mePlaceAt(col, row); } finally { _meActiveTool = t0; }
     });
     return;
   }
@@ -13266,15 +13334,25 @@ function _mePlaceAt(col, row) {
     group.userData.meItem = true;
     const item = { type: _meActiveTool, col, row, scale, seed, group };
     _meItems.push(item);
+    // Captured by undo so redo can restore the EXACT same object (same group,
+    // same obstacle) rather than rebuilding a differently-seeded one.
+    let _rmObs = null, _wasScenery = false;
     _mePushUndo(() => {
       // Reverse: remove the placed object exactly as erase would
       scene.remove(item.group);
       const i = _meItems.indexOf(item);
       if (i !== -1) _meItems.splice(i, 1);
       const si = staticObstacles.findIndex(o => Math.abs(o.x - col) < 0.5 && Math.abs(o.z - row) < 0.5);
-      if (si !== -1) staticObstacles.splice(si, 1);
+      if (si !== -1) { _rmObs = staticObstacles[si]; staticObstacles.splice(si, 1); }
       const cell2 = grid[`${col},${row}`];
-      if (cell2 && cell2.type === 'scenery') cell2.type = 'grass';
+      _wasScenery = !!(cell2 && cell2.type === 'scenery');
+      if (_wasScenery) cell2.type = 'grass';
+    }, () => {
+      scene.add(item.group);
+      _meItems.push(item);
+      if (_rmObs) staticObstacles.push(_rmObs);
+      const cell2 = grid[`${col},${row}`];
+      if (_wasScenery && cell2) cell2.type = 'scenery';
     });
   }
 }
@@ -13294,11 +13372,59 @@ function _meRestoreObject(captured) {
   else if (captured.kind === 'initialScenery') initialScenery.push(captured.item);
 }
 
+// Order a lane's tiles into a walkable chain: start at the spawn-most (lowest col)
+// tile, then greedily hop to the nearest remaining tile. Freehand paint order —
+// scribbles, backtracks, painting the middle first — becomes a sane spawn→castle
+// route instead of enemies teleporting between tiles in raw click order.
+function _meOrderPathTiles(tiles) {
+  if (tiles.length < 3) return tiles.slice();
+  const rest = tiles.slice();
+  let idx = 0;
+  for (let i = 1; i < rest.length; i++) {
+    if (rest[i][0] < rest[idx][0] || (rest[i][0] === rest[idx][0] && rest[i][1] < rest[idx][1])) idx = i;
+  }
+  const out = [rest.splice(idx, 1)[0]];
+  while (rest.length) {
+    const [cc, cr] = out[out.length - 1];
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < rest.length; i++) {
+      const d = Math.abs(rest[i][0] - cc) + Math.abs(rest[i][1] - cr);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    out.push(rest.splice(best, 1)[0]);
+  }
+  return out;
+}
+
+// Pre-flight report for Test Play: human-readable warnings about lanes that will
+// play badly (gaps, wrong start/end). Informative, never blocking.
+function _meValidatePaths() {
+  const laneNames = ['A', 'B', 'C'];
+  const warnings = [];
+  let any = false;
+  for (let pi = 0; pi < 3; pi++) {
+    if (!_mePaths[pi].length) continue;
+    any = true;
+    const tiles = _meOrderPathTiles(_mePaths[pi]);
+    const L = laneNames[pi];
+    if (tiles.length < 8) warnings.push(`Path ${L} is very short (${tiles.length} tiles)`);
+    let gaps = 0;
+    for (let i = 1; i < tiles.length; i++) {
+      const d = Math.max(Math.abs(tiles[i][0] - tiles[i-1][0]), Math.abs(tiles[i][1] - tiles[i-1][1]));
+      if (d > 1) gaps++;
+    }
+    if (gaps) warnings.push(`Path ${L} has ${gaps} gap${gaps > 1 ? 's' : ''} — enemies will jump them`);
+    if (tiles[0][0] > 4) warnings.push(`Path ${L} doesn't start at the left (spawn) edge`);
+    if (tiles[tiles.length - 1][0] < 58) warnings.push(`Path ${L} doesn't reach the castle side`);
+  }
+  return { any, warnings };
+}
+
 // Rebuild PATHS[0/1/2] and PATH_SET from the editor's path tile data
 function _meRebuildPaths() {
   const allPathKeys = new Set();
   for (let pi = 0; pi < 3; pi++) {
-    PATHS[pi] = _mePaths[pi].slice();
+    PATHS[pi] = _meOrderPathTiles(_mePaths[pi]);
     _mePaths[pi].forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
   }
   // Merge with pre-existing PATH_SET (layout paths) — don't wipe game paths
@@ -13422,9 +13548,14 @@ function _meEraseAt(col, row) {
   }
   _meRebuildPaths();
 
-  // Group all sub-undos into a single undo entry — one Ctrl+Z reverses the whole erase
+  // Group all sub-undos into a single undo entry — one Ctrl+Z reverses the whole erase.
+  // Redo simply re-runs the erase on the restored state (guarded by _meReplaying so
+  // the replay records nothing new).
   if (undoActions.length) {
-    _mePushUndo(() => { for (let i = undoActions.length - 1; i >= 0; i--) undoActions[i](); });
+    _mePushUndo(
+      () => { for (let i = undoActions.length - 1; i >= 0; i--) undoActions[i](); },
+      () => { _meEraseAt(col, row); },
+    );
   }
 }
 
@@ -13598,8 +13729,8 @@ function _meRefreshMapList() {
     const delBtn = document.createElement('button');
     delBtn.className = 'me-map-del-btn';
     delBtn.textContent = '✕';
-    delBtn.title = 'Delete map';
-    delBtn.addEventListener('click', () => _meDeleteMap(map.name));
+    delBtn.title = 'Delete map (click twice)';
+    delBtn.addEventListener('click', (e) => _meArmConfirm(e.currentTarget, () => _meDeleteMap(map.name)));
     row.appendChild(loadBtn); row.appendChild(delBtn);
     _meMapList.appendChild(row);
   }
@@ -13618,7 +13749,10 @@ function _meSetTool(tool) {
 function enterMapEditorMode() {
   if (studioMode) exitStudio();
   mapEditorMode = true;
-  _meUndoStack.length = 0; // fresh undo stack each session
+  _meUndoStack.length = 0; // fresh undo/redo stacks each session
+  _meRedoStack.length = 0;
+  const _retBtn = document.getElementById('me-return-btn');
+  if (_retBtn) _retBtn.style.display = 'none';
   document.getElementById('hud').style.display = 'none';
   document.getElementById('build-panel').style.display = 'none';
   document.getElementById('scroll-hint').style.display = 'none';
@@ -13648,7 +13782,7 @@ function enterMapEditorMode() {
       biomeGrid.appendChild(btn);
     });
   }
-  showTooltip('Map Editor — drag-paint tiles · right-click erases · Ctrl+Z undo · G/D/S/W/L T R E hotkeys · P test play', 5500);
+  showTooltip('Map Editor — drag-paint tiles · right-click erases · Ctrl+Z / Ctrl+Y undo-redo · paths auto-connect · P test play', 5500);
 }
 
 function exitMapEditorMode() {
@@ -13678,9 +13812,33 @@ document.getElementById('me-save-btn').addEventListener('click', () => {
   showTooltip('Map saved!', 1500);
 });
 
-document.getElementById('me-clear-btn').addEventListener('click', () => {
-  _meClearAll();
-  showTooltip('Cleared everything — only castle and path tiles remain', 1800);
+// Two-click confirm for destructive buttons: first click arms ("Sure?"), a second
+// click within 2.5s fires. Less jarring than a modal, but stops fatal misclicks.
+function _meArmConfirm(btn, run) {
+  if (btn.dataset.armed) {
+    clearTimeout(+btn.dataset.armT);
+    delete btn.dataset.armed;
+    btn.textContent = btn.dataset.origLabel;
+    btn.classList.remove('me-armed');
+    run();
+    return;
+  }
+  btn.dataset.origLabel = btn.textContent;
+  btn.dataset.armed = '1';
+  btn.classList.add('me-armed');
+  btn.textContent = '⚠ Sure?';
+  btn.dataset.armT = setTimeout(() => {
+    delete btn.dataset.armed;
+    btn.textContent = btn.dataset.origLabel;
+    btn.classList.remove('me-armed');
+  }, 2500);
+}
+
+document.getElementById('me-clear-btn').addEventListener('click', (e) => {
+  _meArmConfirm(e.currentTarget, () => {
+    _meClearAll();
+    showTooltip('Cleared everything — only castle and path tiles remain', 1800);
+  });
 });
 
 document.getElementById('me-exit-btn').addEventListener('click', () => exitMapEditorMode());
@@ -13689,6 +13847,8 @@ document.getElementById('me-exit-btn').addEventListener('click', () => exitMapEd
 // We don't run a full level — this is a sandbox test of the layout. Player can
 // return to the editor via the ESC menu.
 document.getElementById('me-play-btn')?.addEventListener('click', () => {
+  // Pre-flight path check BEFORE leaving the editor so the author sees problems
+  const v = _meValidatePaths();
   exitMapEditorMode();
   _resetRunState();
   // Pre-seed all unlocks so the player can test all tools on their custom map
@@ -13698,10 +13858,36 @@ document.getElementById('me-play-btn')?.addEventListener('click', () => {
   gold = 200;
   updateHUD();
   if (gameSpeed === 0) gameSpeed = 1;
-  showTooltip('Test Play — your custom map • press Start to launch wave 1', 3500);
+  // Floating "Back to Editor" button — the return path used to be buried in the ESC menu
+  const retBtn = document.getElementById('me-return-btn');
+  if (retBtn) retBtn.style.display = 'block';
+  if (!v.any) {
+    showTooltip('Test Play — no custom paths drawn, using the default roads • press Start', 4000);
+  } else if (v.warnings.length) {
+    const shown = v.warnings.slice(0, 2).join(' · ');
+    showTooltip(`⚠ ${shown}${v.warnings.length > 2 ? ` (+${v.warnings.length - 2} more)` : ''} — starting anyway`, 5000);
+  } else {
+    showTooltip('Test Play — your custom map • press Start to launch wave 1', 3500);
+  }
+});
+
+// Return from test play straight back into the editor (map state survives the trip)
+document.getElementById('me-return-btn')?.addEventListener('click', () => {
+  document.getElementById('me-return-btn').style.display = 'none';
+  window._switchToMode('map');
 });
 
 document.getElementById('me-undo-btn')?.addEventListener('click', () => _meUndo());
+document.getElementById('me-redo-btn')?.addEventListener('click', () => _meRedo());
+
+// Brush size buttons (1×1 / 2×2 / 3×3 — applies to plain tiles and erase)
+document.querySelectorAll('.me-brush-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _meBrushSize = parseInt(btn.dataset.brush) || 1;
+    document.querySelectorAll('.me-brush-btn').forEach(b =>
+      b.classList.toggle('active', parseInt(b.dataset.brush) === _meBrushSize));
+  });
+});
 
 document.getElementById('me-export-btn').addEventListener('click', () => {
   if (_meSavedMaps.length === 0) { showTooltip('No saved maps to export', 1800); return; }
