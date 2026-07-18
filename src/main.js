@@ -10056,7 +10056,15 @@ function liveDefenderCount() {
 
 function updateHUD() {
   elMana.textContent     = gold;
-  elWaveVal.textContent  = wave;
+  // Story levels show progress within the level ("2/3"); endless/free show the raw wave
+  if (currentLevel && currentLevel.id !== 'endless' && wave >= currentLevel.startWave) {
+    const total = currentLevel.endWave - currentLevel.startWave + 1;
+    elWaveVal.textContent = `${wave - currentLevel.startWave + 1}/${total}`;
+    elWaveVal.title = `Wave ${wave} overall`;
+  } else {
+    elWaveVal.textContent = wave;
+    elWaveVal.title = '';
+  }
   elKillsVal.textContent = kills;
   if (gold >= 500) _unlockAchievement('goldHoarder');
   const cur = liveDefenderCount();
@@ -10671,6 +10679,8 @@ function showLevelSelect(opts = {}) {
         <div class="ls-node-label">
           <div class="ls-node-name">${unlocked ? L.name : 'Locked'}</div>
           <div class="ls-node-stars">${unlocked ? starsHtml : ''}</div>
+          ${unlocked && L.boss ? `<div class="ls-node-boss" title="This realm's final wave is a boss fight">👑 ${L.boss.name}</div>` : ''}
+          ${unlocked ? `<div class="ls-node-waves">Waves ${L.startWave}–${L.endWave}</div>` : ''}
           ${bestHtml}
         </div>
       `;
@@ -10700,7 +10710,14 @@ function showLevelSelect(opts = {}) {
     // ── TITLE ──
     const banner = document.createElement('div');
     banner.className = 'ls-title-banner';
-    banner.innerHTML = `Select a Realm<span class="lt-sub">THE FIVE REALMS OF AVALON</span>`;
+    {
+      // Aggregate star progress across all story realms — visible without opening Records
+      let starSum = 0;
+      for (const L of LEVELS) starSum += levelProgress[String(L.id)]?.bestStars || 0;
+      const starMax = LEVELS.length * LEVEL_MAX_STARS;
+      banner.innerHTML = `Select a Realm<span class="lt-sub">THE FIVE REALMS OF AVALON` +
+        (starSum > 0 ? ` &nbsp;·&nbsp; ${starSum} / ${starMax} ⭐` : '') + `</span>`;
+    }
     map.appendChild(banner);
 
     // ── RECORDS BUTTON (top-right) — opens the stats/records screen ──
@@ -10806,11 +10823,22 @@ function showStats() {
   }).join('');
 
   // ── Achievements grid ──
+  // Progress counts for counter-based achievements ("47 / 100" beats a bare lock)
+  const ACH_PROGRESS = {
+    centurion:   () => [achievementState.stats.kills || 0, 100],
+    slayer1000:  () => [achievementState.stats.kills || 0, 1000],
+    wallEnjoyer: () => [achievementState.stats.wallsBuilt || 0, 50],
+  };
   const achHtml = ACHIEVEMENTS.map(a => {
     const have = achievementState.unlocked.has(a.id);
+    let prog = '';
+    if (!have && ACH_PROGRESS[a.id]) {
+      const [cur, goal] = ACH_PROGRESS[a.id]();
+      prog = `<span class="sa-prog">${Math.min(cur, goal)} / ${goal}</span>`;
+    }
     return `<div class="stats-ach ${have ? '' : 'locked'}" title="${a.desc}">
       <span class="sa-icon">${have ? a.icon : '🔒'}</span>
-      <span class="sa-name">${a.name}</span>
+      <span class="sa-name">${a.name}</span>${prog}
     </div>`;
   }).join('');
 
