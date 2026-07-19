@@ -16230,6 +16230,13 @@ function _cmpOutcome(a, b) {
       else if (isStudio) enterStudio();
       else if (isMap)    enterMapEditorMode();
       // 'game' = just exit current mode (already done above)
+      // A finished run's game-over screen must not sit on top of a special mode
+      // (test mode dismisses it via _dismissAllOverlays; studio/map here) — and
+      // returning to the game must bring it back, or the dead run is left with
+      // no Retry path: Start stays disabled and the field is frozen.
+      const goEl = document.getElementById('game-over');
+      if (isStudio || isMap) goEl.classList.remove('visible');
+      else if (!isTest && gameOver) goEl.classList.add('visible');
     };
     if (needsFlash) _modeFlash(doSwitch);
     else            doSwitch();
