@@ -10057,10 +10057,17 @@ function liveDefenderCount() {
 function updateHUD() {
   elMana.textContent     = gold;
   // Story levels show progress within the level ("2/3"); endless/free show the raw wave
-  if (currentLevel && currentLevel.id !== 'endless' && wave >= currentLevel.startWave) {
+  if (currentLevel && currentLevel.id !== 'endless') {
     const total = currentLevel.endWave - currentLevel.startWave + 1;
-    elWaveVal.textContent = `${wave - currentLevel.startWave + 1}/${total}`;
-    elWaveVal.title = `Wave ${wave} overall`;
+    if (wave >= currentLevel.startWave) {
+      elWaveVal.textContent = `${wave - currentLevel.startWave + 1}/${total}`;
+      elWaveVal.title = `Wave ${wave} overall`;
+    } else {
+      // Pre-first-wave: the raw global counter used to leak through here, so
+      // starting e.g. level 3 showed a bare "6" — display 0-of-total instead.
+      elWaveVal.textContent = `0/${total}`;
+      elWaveVal.title = `Press Start to begin wave 1 of ${total}`;
+    }
   } else {
     elWaveVal.textContent = wave;
     elWaveVal.title = '';
@@ -10822,6 +10829,20 @@ function showStats() {
             <div class="se-val st-none">— no record —</div>`;
   }).join('');
 
+  // ── Free-play personal best ──
+  // Written by saveHighScore() on every non-endless game over; until now it was
+  // only ever shown on the game-over screen itself, never in the Records screen.
+  let freeBest = null;
+  try {
+    const rawFp = localStorage.getItem('tdHighScore');
+    if (rawFp) freeBest = JSON.parse(rawFp);
+  } catch { /* corrupted save — just show "no record" */ }
+  const freeBestRow = freeBest && Number.isFinite(freeBest.wave)
+    ? `<div class="se-diff">🏰 Free Play Best</div>
+       <div class="se-val">Wave ${freeBest.wave} • ${freeBest.kills || 0} kills</div>`
+    : `<div class="se-diff">🏰 Free Play Best</div>
+       <div class="se-val st-none">— no record —</div>`;
+
   // ── Achievements grid ──
   // Progress counts for counter-based achievements ("47 / 100" beats a bare lock)
   const ACH_PROGRESS = {
@@ -10871,6 +10892,11 @@ function showStats() {
     <div class="stats-section">
       <div class="stats-section-title">ENDLESS MODE — PERSONAL BEST</div>
       <div class="stats-endless-row">${endlessRows}</div>
+    </div>
+
+    <div class="stats-section">
+      <div class="stats-section-title">FREE PLAY — PERSONAL BEST</div>
+      <div class="stats-endless-row">${freeBestRow}</div>
     </div>
 
     <div class="stats-section">
