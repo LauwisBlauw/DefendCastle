@@ -3592,6 +3592,27 @@ function buildCastle() {
   addFlag(g, 71, 5.0, 31.0);
   addFlag(g, 68.5, 9.75, 27);
 
+  // Fire braziers atop the two mid-gate pillars
+  [[66, 26], [66, 28]].forEach(([bx, bz]) => {
+    const stand = mesh(box(0.14, 0.18, 0.14), M.townIron); stand.position.set(bx, 3.89, bz); g.add(stand);
+    const bowl = mesh(box(0.34, 0.13, 0.34), M.townIron); bowl.position.set(bx, 4.04, bz); g.add(bowl);
+    const fire = mesh(box(0.22, 0.20, 0.22), M.townForge); fire.position.set(bx, 4.20, bz); fire.castShadow = false; g.add(fire);
+    const ember = mesh(box(0.10, 0.12, 0.10), M.townForge); ember.position.set(bx, 4.35, bz); ember.castShadow = false; g.add(ember);
+  });
+
+  // Long royal wall banners hanging on the keep's west face, flanking the entrance
+  [25.85, 28.15].forEach(bz => {
+    const cloth = mesh(box(0.08, 2.0, 0.55), M.castleFlag); cloth.position.set(66.72, 6.4, bz); g.add(cloth);
+    const rod = mesh(box(0.10, 0.08, 0.70), M.castleFlagPole); rod.position.set(66.70, 7.44, bz); g.add(rod);
+    const tip = mesh(box(0.09, 0.10, 0.55), M.swGold); tip.position.set(66.72, 5.35, bz); g.add(tip);
+  });
+
+  // Kite shields of the Order mounted on the flanking gate towers
+  [23, 31].forEach(sz => {
+    const sh = mesh(box(0.08, 0.42, 0.30), M.swShield); sh.position.set(65.31, 3.1, sz); g.add(sh);
+    const boss = mesh(box(0.06, 0.14, 0.10), M.swGold); boss.position.set(65.26, 3.1, sz); g.add(boss);
+  });
+
   // Wall-mounted torches flanking the gate openings
   const torchMat = new THREE.MeshStandardMaterial({ color: 0xff7700, emissive: 0xff5500, emissiveIntensity: 2.4 });
   const bracketMat = M.catMetal;
