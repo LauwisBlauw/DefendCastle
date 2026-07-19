@@ -11477,7 +11477,25 @@ document.addEventListener('mousedown', e => {
 }, { capture: true, passive: true });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'b' || e.key === 'B') { if (studioMode) exitStudio(); else enterStudio(); return; }
+  if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Ignore while typing (map name, test scripts, layer rename, …) and while a
+    // blocking modal is up — 'b' in an input used to yank the player into Studio.
+    if (document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/i.test(document.activeElement.tagName)) return;
+    const modalOpen =
+      document.getElementById('level-select')?.classList.contains('visible') ||
+      document.getElementById('level-complete')?.classList.contains('visible') ||
+      document.getElementById('stats-screen')?.classList.contains('visible') ||
+      document.getElementById('merchant')?.classList.contains('visible') ||
+      document.getElementById('game-over')?.classList.contains('visible') ||
+      document.getElementById('esc-menu')?.classList.contains('open');
+    if (modalOpen) return;
+    // Route through the mode switcher so test/map modes exit cleanly first —
+    // calling enterStudio() directly stacked Studio on top of whatever mode was open.
+    if (window._switchToMode) window._switchToMode(studioMode ? 'game' : 'studio');
+    else if (studioMode) exitStudio();
+    else enterStudio();
+    return;
+  }
   // ── Studio build-tab keyboard shortcuts ──────────────────────────────────
   if (studioMode && studioTab === 'build') {
     const isInput = document.activeElement?.tagName === 'INPUT';
