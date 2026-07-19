@@ -2611,15 +2611,35 @@ function _mbCottage(g, rng) {
   const chTop = mesh(box(0.26, 0.07, 0.26), M.townStone); chTop.position.set(chX, h + chH, 0); g.add(chTop);
   const chPot = mesh(box(0.11, 0.14, 0.11), M.townStoneD); chPot.position.set(chX, h + chH + 0.10, 0); g.add(chPot);
 
+  // Chimney smoke puffs (static stylised grey boxes drifting up)
+  [[0.02, 0.10, 0.02, 0.09], [-0.05, 0.28, 0.06, 0.12], [0.06, 0.50, -0.04, 0.15]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(chX + ox, h + chH + 0.20 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
+
   // Front windows with wooden surrounds
   const wY = 0.12 + baseH + uH * 0.52;
-  [w * 0.26, w > 1.0 ? -w * 0.26 : null].filter(Boolean).forEach(wx => {
+  [w * 0.26, w > 1.0 ? -w * 0.26 : null].filter(Boolean).forEach((wx, wi) => {
     const win = mesh(box(0.21, 0.25, 0.06), M.townWin); win.position.set(wx, wY, d / 2 + 0.02); g.add(win);
     // Wooden surround
     const wBot = mesh(box(0.26, 0.055, 0.065), M.townBeam); wBot.position.set(wx, wY - 0.15, d / 2 + 0.02); g.add(wBot);
     const wTop = mesh(box(0.26, 0.055, 0.065), M.townBeam); wTop.position.set(wx, wY + 0.15, d / 2 + 0.02); g.add(wTop);
     const wL = mesh(box(0.055, 0.26, 0.065), M.townBeam); wL.position.set(wx - 0.13, wY, d / 2 + 0.02); g.add(wL);
     const wR = mesh(box(0.055, 0.26, 0.065), M.townBeam); wR.position.set(wx + 0.13, wY, d / 2 + 0.02); g.add(wR);
+    // Open wooden shutters flanking the frame
+    [-0.20, 0.20].forEach(sx => {
+      const sh = mesh(box(0.09, 0.24, 0.045), M.townDoor); sh.position.set(wx + sx, wY, d / 2 + 0.025); g.add(sh);
+    });
+    // Flower box under the first window
+    if (wi === 0) {
+      const fb = mesh(box(0.24, 0.07, 0.08), M.townBeam); fb.position.set(wx, wY - 0.20, d / 2 + 0.06); g.add(fb);
+      [-0.06, 0.02, 0.08].forEach((fx, fi) => {
+        const fl = mesh(box(0.045, 0.05, 0.045), fi === 1 ? M.mushSpot : M.mushCap);
+        fl.position.set(wx + fx, wY - 0.15, d / 2 + 0.06); g.add(fl);
+      });
+    }
   });
 
   // Door + stone arch lintel
@@ -2688,6 +2708,21 @@ function _mbFarmhouse(g, rng) {
     const fp = mesh(box(0.06, 0.36, 0.06), M.townBeam); fp.position.set(-w / 2 - 0.06, 0.18, -d / 2 + fi * 0.34); g.add(fp);
   }
   const fence = mesh(box(0.05, 0.06, d * 0.55), M.townBeam); fence.position.set(-w / 2 - 0.06, 0.26, -d / 4); g.add(fence);
+
+  // Water trough along the fence line
+  const trough = mesh(box(0.20, 0.14, 0.44), M.townPlanks); trough.position.set(-w / 2 - 0.26, 0.07, d * 0.18); g.add(trough);
+  const trWater = mesh(box(0.14, 0.03, 0.38), M.waterShallow); trWater.position.set(-w / 2 - 0.26, 0.13, d * 0.18); trWater.castShadow = false; g.add(trWater);
+
+  // Crates stacked beside the barn doors
+  const crate = mesh(box(0.24, 0.24, 0.24), M.townPlanks); crate.position.set(-w * 0.42, 0.12, d / 2 + 0.24); g.add(crate);
+  const crate2 = mesh(box(0.19, 0.19, 0.19), M.townPlanks); crate2.position.set(-w * 0.42, 0.33, d / 2 + 0.24); g.add(crate2);
+  const crateX = mesh(box(0.42, 0.05, 0.05), M.townBeam); crateX.position.set(-w * 0.42 + 0.24, 0.19, d / 2 + 0.24); crateX.rotation.z = 1.0; g.add(crateX);
+
+  // Pitchfork leaning on the front wall
+  const pfHandle = mesh(box(0.045, 0.62, 0.045), M.townBeam);
+  pfHandle.position.set(w * 0.14, 0.31, d / 2 + 0.09); pfHandle.rotation.x = -0.22; g.add(pfHandle);
+  const pfHead = mesh(box(0.14, 0.10, 0.04), M.townIron);
+  pfHead.position.set(w * 0.14, 0.60, d / 2 + 0.025); g.add(pfHead);
 }
 
 // ── 3. Windmill ─────────────────────────────────────────────────────────────
@@ -2748,6 +2783,20 @@ function _mbWindmill(g, rng) {
 
   // Wooden platform at base
   const plat = mesh(box(tR * 2.3, 0.10, tR * 2.3), M.townPlanks); plat.position.y = 0.05; g.add(plat);
+
+  // Rear hoist beam under the cap with rope + hanging grain sack (opposite the sails)
+  const hoistLen = tR + 0.55;
+  const hoist = mesh(box(0.07, 0.07, hoistLen), M.townBeam); hoist.position.set(0, h - 0.06, -(hoistLen / 2) + 0.15); g.add(hoist);
+  const hoistRope = mesh(box(0.028, 0.42, 0.028), M.ballistaRope); hoistRope.position.set(0, h - 0.30, -(tR + 0.25)); g.add(hoistRope);
+  const hoistSack = mesh(box(0.15, 0.19, 0.15), M.spLeather); hoistSack.position.set(0, h - 0.58, -(tR + 0.25)); g.add(hoistSack);
+
+  // Rear loading hatch (planked door up the tower back face, under the hoist)
+  const hatch = mesh(box(0.24, 0.32, 0.06), M.townDoor); hatch.position.set(0, h * 0.80, -(tR * 0.76 + 0.01)); g.add(hatch);
+
+  // Grain sacks dropped on the ground beside the platform
+  const sackA = mesh(box(0.19, 0.24, 0.19), M.spLeather); sackA.position.set(tR * 1.35, 0.12, tR * 0.70); sackA.rotation.y = 0.5; g.add(sackA);
+  const sackB = mesh(box(0.16, 0.18, 0.16), M.spLeather); sackB.position.set(tR * 1.52, 0.09, tR * 0.18); sackB.rotation.y = 1.2; g.add(sackB);
+  const sackTie = mesh(box(0.21, 0.035, 0.21), M.arcBelt); sackTie.position.set(tR * 1.35, 0.20, tR * 0.70); sackTie.rotation.y = 0.5; g.add(sackTie);
 }
 
 // ── 4. Blacksmith ────────────────────────────────────────────────────────────
@@ -2799,6 +2848,25 @@ function _mbBlacksmith(g, rng) {
   // Barrel
   const barrel = mesh(box(0.18, 0.24, 0.18), M.townBeam); barrel.position.set(-w * 0.44, 0.12 + 0.14, d / 2 + 0.20); g.add(barrel);
   const bTop = mesh(box(0.20, 0.04, 0.20), M.townStoneD); bTop.position.set(-w * 0.44, 0.26 + 0.14, d / 2 + 0.20); g.add(bTop);
+
+  // Hanging trade sign — bracket arm + board with iron anvil silhouette
+  const sgBracket = mesh(box(0.05, 0.26, 0.05), M.townBeam); sgBracket.position.set(-w * 0.30, h - 0.11, d / 2 + 0.03); g.add(sgBracket);
+  const sgArm = mesh(box(0.05, 0.05, 0.28), M.townBeam); sgArm.position.set(-w * 0.30, h, d / 2 + 0.16); g.add(sgArm);
+  const sgBoard = mesh(box(0.30, 0.22, 0.05), M.townSign); sgBoard.position.set(-w * 0.30, h - 0.17, d / 2 + 0.28); g.add(sgBoard);
+  const sgAnvilB = mesh(box(0.13, 0.05, 0.07), M.townIron); sgAnvilB.position.set(-w * 0.30, h - 0.22, d / 2 + 0.32); g.add(sgAnvilB);
+  const sgAnvilT = mesh(box(0.17, 0.05, 0.07), M.townIron); sgAnvilT.position.set(-w * 0.30, h - 0.16, d / 2 + 0.32); g.add(sgAnvilT);
+
+  // Forge smoke above the chimney (static grey puffs)
+  [[0.03, 0.12, 0.02, 0.11], [-0.05, 0.34, -0.04, 0.15]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(-w * 0.30 + ox, h + 0.14 + chH + 0.10 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
+
+  // Iron ingot stack by the anvil
+  const ingA = mesh(box(0.16, 0.05, 0.07), M.catMetal); ingA.position.set(w * 0.24, 0.025, d / 2 + 0.42); g.add(ingA);
+  const ingB = mesh(box(0.16, 0.05, 0.07), M.catMetal); ingB.position.set(w * 0.26, 0.075, d / 2 + 0.40); ingB.rotation.y = 0.35; g.add(ingB);
 }
 
 // ── 5. Tavern / Inn ──────────────────────────────────────────────────────────
@@ -2859,6 +2927,27 @@ function _mbTavern(g, rng) {
   const bracket = mesh(box(0.055, 0.38, 0.055), M.townBeam); bracket.position.set(w * 0.44, 0.13 + h1 + 0.30, d / 2 + 0.16); g.add(bracket);
   const arm = mesh(box(0.055, 0.055, 0.30), M.townBeam); arm.position.set(w * 0.44, 0.13 + h1 + 0.44, d / 2 + 0.16); g.add(arm);
   const sign = mesh(box(0.38, 0.18, 0.06), M.townSign); sign.position.set(w * 0.44, 0.13 + h1 + 0.26, d / 2 + 0.30); g.add(sign);
+  // Golden ale mug emblem on the sign board
+  const mug = mesh(box(0.09, 0.11, 0.05), M.swGold); mug.position.set(w * 0.44 - 0.02, 0.13 + h1 + 0.26, d / 2 + 0.345); g.add(mug);
+  const mugHandle = mesh(box(0.035, 0.07, 0.045), M.swGold); mugHandle.position.set(w * 0.44 + 0.055, 0.13 + h1 + 0.26, d / 2 + 0.345); g.add(mugHandle);
+
+  // Door lantern (warm glow cube in an iron cap) beside the entrance
+  const dlGlow = mesh(box(0.09, 0.11, 0.09), M.townWin); dlGlow.position.set(0.24, 0.13 + h1 * 0.82, d / 2 + 0.055); dlGlow.castShadow = false; g.add(dlGlow);
+  const dlCap = mesh(box(0.12, 0.04, 0.12), M.townIron); dlCap.position.set(0.24, 0.13 + h1 * 0.82 + 0.075, d / 2 + 0.055); g.add(dlCap);
+
+  // Bench under the left window
+  const benchSeat = mesh(box(0.42, 0.05, 0.16), M.townPlanks); benchSeat.position.set(-w * 0.28, 0.20, d / 2 + 0.20); g.add(benchSeat);
+  [-0.16, 0.16].forEach(lx => {
+    const leg = mesh(box(0.06, 0.18, 0.12), M.townBeam); leg.position.set(-w * 0.28 + lx, 0.09, d / 2 + 0.20); g.add(leg);
+  });
+
+  // Chimney smoke puffs
+  [[0.03, 0.10, 0.02, 0.10], [-0.04, 0.30, -0.05, 0.13]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(w * 0.28 + ox, chBase + chH + 0.12 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
 
   // Step + barrels by door
   const step2 = mesh(box(0.38, 0.07, 0.16), M.townStoneD); step2.position.set(0, 0.035, d / 2 + 0.12); g.add(step2);
@@ -2893,6 +2982,9 @@ function _mbChapel(g, rng) {
   const btower = mesh(box(btW, btH, btW), M.townStone); btower.position.set(0, btBase + btH / 2, d / 2 - btW * 0.45); g.add(btower);
   // Bell tower arched opening
   const bell = mesh(box(btW * 0.45, btH * 0.5, 0.06), M.townWin); bell.position.set(0, btBase + btH * 0.6, d / 2 - btW * 0.45 + btW / 2); g.add(bell);
+  // Golden bell hanging in the opening
+  const bellBody = mesh(box(btW * 0.24, btH * 0.28, 0.10), M.swGold); bellBody.position.set(0, btBase + btH * 0.58, d / 2 - btW * 0.45 + btW / 2 + 0.05); g.add(bellBody);
+  const bellClapper = mesh(box(0.045, 0.06, 0.045), M.townIron); bellClapper.position.set(0, btBase + btH * 0.40, d / 2 - btW * 0.45 + btW / 2 + 0.05); g.add(bellClapper);
   // Bell tower roof
   for (let s = 0; s < 4; s++) {
     const t = 1 - s / 4;
@@ -2918,6 +3010,19 @@ function _mbChapel(g, rng) {
   const door = mesh(box(dW, dH, 0.07), M.townDoor); door.position.set(0, 0.14 + dH / 2, d / 2 + 0.02); g.add(door);
   const arch2 = mesh(box(dW + 0.12, 0.14, 0.09), M.townStone); arch2.position.set(0, 0.14 + dH + 0.07, d / 2 + 0.02); g.add(arch2);
   const step3 = mesh(box(0.40, 0.07, 0.18), M.townStoneD); step3.position.set(0, 0.035, d / 2 + 0.12); g.add(step3);
+
+  // Gilded cross tracery over the front lancet window
+  const dcV = mesh(box(0.04, 0.34, 0.03), M.swGold); dcV.position.set(0, wY, d / 2 + 0.055); g.add(dcV);
+  const dcH = mesh(box(0.13, 0.04, 0.03), M.swGold); dcH.position.set(0, wY + 0.09, d / 2 + 0.055); g.add(dcH);
+
+  // Churchyard gravestones along the side wall
+  [[w / 2 + 0.24, -d * 0.10, 0.12, 0.20, 0.15], [w / 2 + 0.30, d * 0.16, 0.14, 0.16, -0.2], [w / 2 + 0.22, -d * 0.32, 0.11, 0.14, 0.35]].forEach(([gx, gz, gw, gh, tilt]) => {
+    const gs = mesh(box(gw, gh, 0.05), M.townStoneD);
+    gs.position.set(gx, gh / 2, gz); gs.rotation.y = 0.5 + tilt; gs.rotation.z = tilt * 0.3;
+    g.add(gs);
+  });
+  // Tiny stone cross topping the first grave
+  const gcV = mesh(box(0.035, 0.10, 0.035), M.townStoneD); gcV.position.set(w / 2 + 0.24, 0.24, -d * 0.10); gcV.rotation.y = 0.5; g.add(gcV);
 }
 
 // ── 7. Watchtower ────────────────────────────────────────────────────────────
@@ -2972,6 +3077,20 @@ function _mbWatchtower(g, rng) {
   [[h * 0.35, tW / 2], [h * 0.65, tW / 2]].forEach(([wy, wz]) => {
     const ws = mesh(box(0.09, 0.28, 0.08), M.townWin); ws.position.set(0, wy, wz + 0.01); g.add(ws);
   });
+
+  // Signal brazier on the parapet corner — iron bowl with live fire glow
+  const brStand = mesh(box(0.07, 0.14, 0.07), M.townIron); brStand.position.set(pw * 0.38, h + 0.23, -pw * 0.38); g.add(brStand);
+  const brBowl = mesh(box(0.20, 0.09, 0.20), M.townIron); brBowl.position.set(pw * 0.38, 0.345 + h, -pw * 0.38); g.add(brBowl);
+  const brFire = mesh(box(0.13, 0.13, 0.13), M.townForge); brFire.position.set(pw * 0.38, h + 0.45, -pw * 0.38); brFire.castShadow = false; g.add(brFire);
+  const brEmber = mesh(box(0.06, 0.09, 0.06), M.townForge); brEmber.position.set(pw * 0.38, h + 0.56, -pw * 0.38); brEmber.castShadow = false; g.add(brEmber);
+
+  // Royal banner hanging from the parapet lip
+  const bnCloth = mesh(box(0.26, 0.52, 0.045), M.castleFlag); bnCloth.position.set(-tW * 0.28, h - 0.24, tW / 2 + 0.055); g.add(bnCloth);
+  const bnTip = mesh(box(0.26, 0.06, 0.05), M.swGold); bnTip.position.set(-tW * 0.28, h - 0.53, tW / 2 + 0.055); g.add(bnTip);
+
+  // Kite shield mounted above the door
+  const shield = mesh(box(0.20, 0.26, 0.05), M.swShield); shield.position.set(0, dH + 0.34, tW / 2 + 0.045); g.add(shield);
+  const shieldBoss = mesh(box(0.07, 0.09, 0.045), M.swGold); shieldBoss.position.set(0, dH + 0.34, tW / 2 + 0.075); g.add(shieldBoss);
 }
 
 // ── Dispatcher + public wrappers ────────────────────────────────────────────
