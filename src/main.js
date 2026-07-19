@@ -1950,6 +1950,11 @@ function buildTree(x, z, scale = 1.0) {
   f3.position.y = 2.42*scale; g.add(f3);
   const f4 = mesh(box(0.22*scale, 0.34*scale, 0.22*scale), M.treeFoliage);
   f4.position.y = 2.78*scale; g.add(f4);
+  // Leafy tufts poking out of the canopy sides — breaks up the stacked-box silhouette
+  const tuft1 = mesh(box(0.30*scale, 0.22*scale, 0.26*scale), M.treeFoliage2);
+  tuft1.position.set(0.56*scale, 1.32*scale, 0.18*scale); g.add(tuft1);
+  const tuft2 = mesh(box(0.26*scale, 0.20*scale, 0.28*scale), M.treeFoliage);
+  tuft2.position.set(-0.44*scale, 1.80*scale, -0.28*scale); g.add(tuft2);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.28 * scale }); // trunk collision radius
@@ -1970,6 +1975,16 @@ function buildPine(x, z, scale = 1.0) {
   // Snow cap on top
   const snow = mesh(box(0.18*scale, 0.12*scale, 0.18*scale), new THREE.MeshStandardMaterial({ color: 0xeef8ff }));
   snow.position.y = 1.92*scale; g.add(snow);
+  // Root flares at the trunk base
+  [[0.14, 0], [-0.10, 0.11], [-0.08, -0.13]].forEach(([rx, rz]) => {
+    const root = mesh(box(0.11*scale, 0.10*scale, 0.11*scale), M.pineTrunk);
+    root.position.set(rx*scale, 0.05*scale, rz*scale); g.add(root);
+  });
+  // Dead branch stubs poking through the lower tiers
+  const stub1 = mesh(box(0.26*scale, 0.05*scale, 0.05*scale), M.pineTrunk);
+  stub1.position.set(0.50*scale, 0.62*scale, 0.08*scale); stub1.rotation.z = 0.12; g.add(stub1);
+  const stub2 = mesh(box(0.05*scale, 0.05*scale, 0.22*scale), M.pineTrunk);
+  stub2.position.set(-0.10*scale, 0.94*scale, -0.42*scale); stub2.rotation.x = -0.14; g.add(stub2);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.22 * scale });
@@ -1999,6 +2014,14 @@ function buildPalm(x, z, scale = 1.0) {
     const cn = mesh(box(0.1*scale, 0.1*scale, 0.1*scale), M.palmTrunk);
     cn.position.set((ci-1)*0.14*scale, 1.96*scale, (ci%2===0?0.1:-0.1)*scale); g.add(cn);
   }
+  // Fibrous trunk ring bands
+  const ring1 = mesh(box(0.26*scale, 0.06*scale, 0.26*scale), M.spLeather);
+  ring1.position.set(0, 0.62*scale, 0); g.add(ring1);
+  const ring2 = mesh(box(0.26*scale, 0.06*scale, 0.26*scale), M.spLeather);
+  ring2.position.set(0.06*scale, 1.28*scale, 0); g.add(ring2);
+  // Fallen coconut resting at the base
+  const fallen = mesh(box(0.11*scale, 0.10*scale, 0.11*scale), M.palmTrunk);
+  fallen.position.set(0.34*scale, 0.03*scale, -0.26*scale); fallen.rotation.y = 0.6; g.add(fallen);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.22 * scale });
@@ -2031,6 +2054,16 @@ function buildCactus(x, z, scale = 1.0) {
     s.position.set((Math.cos(si*Math.PI/4))*0.16*scale, (0.3+si*0.15)*scale, (Math.sin(si*Math.PI/4))*0.16*scale);
     g.add(s);
   }
+  // Desert bloom crowning the main column
+  const bloom = mesh(box(0.14*scale, 0.08*scale, 0.14*scale), M.mushCap);
+  bloom.position.y = 1.60*scale; g.add(bloom);
+  const bloomHeart = mesh(box(0.07*scale, 0.06*scale, 0.07*scale), M.mushSpot);
+  bloomHeart.position.y = 1.66*scale; g.add(bloomHeart);
+  // Baby barrel cactus at the base
+  const pup = mesh(box(0.16*scale, 0.22*scale, 0.16*scale), M.cactus);
+  pup.position.set(-0.36*scale, 0.11*scale, 0.28*scale); g.add(pup);
+  const pupTop = mesh(box(0.10*scale, 0.08*scale, 0.10*scale), M.cactus);
+  pupTop.position.set(-0.36*scale, 0.25*scale, 0.28*scale); g.add(pupTop);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.24 * scale });
@@ -2062,6 +2095,17 @@ function buildDeadTree(x, z, scale = 1.0) {
     sub.rotation.z = rz + 0.4;
     g.add(sub);
   });
+  // Crow perched on the upper branch
+  const crowBody = mesh(box(0.10*scale, 0.09*scale, 0.09*scale), M.towerRoof);
+  crowBody.position.set(0.44*scale, 1.43*scale, 0.02*scale); g.add(crowBody);
+  const crowHead = mesh(box(0.06*scale, 0.06*scale, 0.06*scale), M.towerRoof);
+  crowHead.position.set(0.49*scale, 1.51*scale, 0.02*scale); g.add(crowHead);
+  // Hollow knot in the trunk
+  const knot = mesh(box(0.10*scale, 0.13*scale, 0.05*scale), M.towerRoof);
+  knot.position.set(0.04*scale, 0.86*scale, 0.12*scale); g.add(knot);
+  // Weathered stone at the roots
+  const dtRock = mesh(box(0.15*scale, 0.10*scale, 0.13*scale), M.rockDark);
+  dtRock.position.set(-0.26*scale, 0.05*scale, 0.18*scale); dtRock.rotation.y = 0.7; g.add(dtRock);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.20 * scale });
@@ -2078,6 +2122,11 @@ function buildMushroom(x, z, scale = 1.0) {
   // Cap underside
   const capU = mesh(box(0.9*scale, 0.12*scale, 0.9*scale), M.mushStem);
   capU.position.y = 0.73*scale; g.add(capU);
+  // Radial gill fins hanging under the cap rim
+  [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4].forEach(ga => {
+    const gill = mesh(box(0.84*scale, 0.10*scale, 0.06*scale), M.skelBone);
+    gill.position.y = 0.625*scale; gill.rotation.y = ga; g.add(gill);
+  });
   // Cap top
   const cap = mesh(box(1.0*scale, 0.38*scale, 1.0*scale), M.mushCap);
   cap.position.y = 0.98*scale; g.add(cap);
@@ -2155,6 +2204,17 @@ function buildRock(x, z, scale, rng) {
     peb.position.set((rng() - 0.5) * 0.7, ph * 0.5 - 0.01, (rng() - 0.5) * 0.65);
     peb.rotation.y = rng() * Math.PI * 2;
     g.add(peb);
+  }
+  // Moss patches draped over the boulder top (biome-tinted foliage colour)
+  if (rng() > 0.35) {
+    const m1 = mesh(box(bw * 0.55, 0.045, bd * 0.45), M.treeFoliage);
+    m1.position.set((rng() - 0.5) * bw * 0.3, bh - 0.04, (rng() - 0.5) * bd * 0.3);
+    m1.rotation.y = main.rotation.y;
+    g.add(m1);
+    const m2 = mesh(box(bw * 0.30, 0.04, bd * 0.32), M.treeFoliage2);
+    m2.position.set((rng() - 0.5) * bw * 0.4, bh - 0.015, (rng() - 0.5) * bd * 0.35);
+    m2.rotation.y = main.rotation.y + 0.4;
+    g.add(m2);
   }
   g.position.set(x, 0, z);
   g.scale.setScalar(scale);
@@ -2486,6 +2546,9 @@ function makeLanternMesh() {
   // Finial spike atop cap
   const finA = mesh(box(0.06, 0.05, 0.06), M.lanternPost); finA.position.set(0, 1.01, 0.35); g.add(finA);
   const finB = mesh(box(0.03, 0.1, 0.03), M.lanternPost); finB.position.set(0, 1.065, 0.35); g.add(finB);
+  // Cobblestones packed around the post footing
+  const cobA = mesh(box(0.09, 0.06, 0.08), M.townStoneD); cobA.position.set(0.10, 0.03, 0.04); cobA.rotation.y = 0.4; g.add(cobA);
+  const cobB = mesh(box(0.07, 0.05, 0.08), M.townStoneD); cobB.position.set(-0.08, 0.025, -0.06); cobB.rotation.y = 1.2; g.add(cobB);
   return g;
 }
 
@@ -3139,6 +3202,16 @@ function buildWell(x, z, rng) {
   // Rope + bucket
   const rope = mesh(box(0.03, 0.26, 0.03), M.townBeam); rope.position.set(0, 0.76, 0); g.add(rope);
   const bucket = mesh(box(0.1, 0.1, 0.1), M.townMetal); bucket.position.set(0, 0.6, 0); g.add(bucket);
+  // Windlass spool on the crossbeam + iron crank handle
+  const spool = mesh(box(0.16, 0.11, 0.11), M.townPlanks); spool.position.set(0, 0.89, 0); g.add(spool);
+  const crankAxle = mesh(box(0.10, 0.045, 0.045), M.townIron); crankAxle.position.set(0.36, 0.89, 0); g.add(crankAxle);
+  const crankArm = mesh(box(0.04, 0.14, 0.04), M.townIron); crankArm.position.set(0.40, 0.82, 0); g.add(crankArm);
+  const crankGrip = mesh(box(0.04, 0.04, 0.10), M.townBeam); crankGrip.position.set(0.40, 0.76, 0.05); g.add(crankGrip);
+  // Water shimmer inside the shaft
+  const wellWater = mesh(box(0.38, 0.04, 0.38), M.waterShallow); wellWater.position.y = 0.28; wellWater.castShadow = false; g.add(wellWater);
+  // Mossy cobbles at the foot of the rim
+  const cob1 = mesh(box(0.12, 0.07, 0.10), M.townStoneD); cob1.position.set(0.38, 0.035, 0.24); cob1.rotation.y = 0.5; g.add(cob1);
+  const cob2 = mesh(box(0.09, 0.06, 0.09), M.townStoneD); cob2.position.set(-0.30, 0.03, -0.36); cob2.rotation.y = 1.1; g.add(cob2);
   g.position.set(x, 0, z);
   g.rotation.y = rng() * Math.PI * 2;
   scene.add(g);
