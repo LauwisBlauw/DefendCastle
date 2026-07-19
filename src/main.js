@@ -13634,19 +13634,32 @@ function _meEraseAt(col, row) {
       if (wasScenery && cell) cell.type = 'scenery';
     });
   }
-  // 1c. Remove path lanterns near this tile (within 1 tile radius)
+  // 1c. Remove path lanterns near this tile (within 1 tile radius).
+  // Keep the lamp objects alive (no dispose) so the undo entry can restore
+  // them — they used to be disposed with no undo action, so Ctrl+Z after an
+  // erase silently lost every nearby lantern.
+  const removedLamps = [];
   for (let i = lanternGroup.children.length - 1; i >= 0; i--) {
     const lamp = lanternGroup.children[i];
     if (Math.abs(lamp.position.x - col) < 1.0 && Math.abs(lamp.position.z - row) < 1.0) {
+      const lampLights = [];
       lamp.traverse(child => {
         if (child.isLight) {
           const li = lanternLights.indexOf(child);
-          if (li !== -1) lanternLights.splice(li, 1);
+          if (li !== -1) { lampLights.push(child); lanternLights.splice(li, 1); }
         }
       });
-      disposeGroup(lamp);
       lanternGroup.remove(lamp);
+      removedLamps.push({ lamp, lights: lampLights });
     }
+  }
+  if (removedLamps.length) {
+    undoActions.push(() => {
+      for (const { lamp, lights } of removedLamps) {
+        lanternGroup.add(lamp);
+        for (const l of lights) lanternLights.push(l);
+      }
+    });
   }
   // 2. Restore tile override
   if (_meTileOverrides[key]) {
