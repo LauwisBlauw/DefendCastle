@@ -16026,7 +16026,14 @@ function _cmpOutcome(a, b) {
   function _dismissAllOverlays() {
     document.getElementById('wave-banner').classList.remove('visible');
     document.getElementById('wave-stars').classList.remove('visible');
-    document.getElementById('merchant').classList.remove('visible');
+    const merchantEl = document.getElementById('merchant');
+    if (merchantEl.classList.contains('visible')) {
+      merchantEl.classList.remove('visible');
+      // The merchant disables Start while it is up. Force-closing it here must
+      // re-enable the button, or the run soft-locks: enter test mode while the
+      // merchant was open and Start stayed dead for the rest of the session.
+      if (!gameOver) elBtnStart.disabled = false;
+    }
     document.getElementById('game-over').classList.remove('visible');
     elLastStand?.classList.remove('active');
     elLastStandTimer?.classList.remove('active');
@@ -16124,6 +16131,11 @@ function _cmpOutcome(a, b) {
     testMode = false;
     _mcTickEnabled = false; // stop MessageChannel ticker
     _gameLoopRafId = requestAnimationFrame(gameLoop); // restart rAF chain
+    // Test-arena speeds (0×–8× via slider/presets/TEST.battle) must not leak into
+    // the normal game, which only knows 0/1/2 — reset to 1× and sync the buttons.
+    gameSpeed = 1;
+    if (elBtnPause) elBtnPause.textContent = '⏸ Pause';
+    if (elBtnSpeed) elBtnSpeed.textContent = '⏩ 2×';
     castleSceneActive = false;
     _arenaLanes = 1;
     _arenaLanePaths = [];
