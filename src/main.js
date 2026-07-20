@@ -1085,6 +1085,12 @@ const M = {
   waterSurf:    new THREE.MeshStandardMaterial({ color: 0x3a9fe0, transparent: true, opacity: 0.52, roughness: 0.0, metalness: 0.5, depthWrite: false }),
   hillGrass:    new THREE.MeshStandardMaterial({ color: 0x3a8040, roughness: 0.88 }),
   hillDark:     new THREE.MeshStandardMaterial({ color: 0x2d6030, roughness: 0.95 }),
+  // Mountains — blocky border ranges + interior outcrops (tints swap per biome in applyBiome)
+  mtRock:       new THREE.MeshStandardMaterial({ color: 0x5f6874, roughness: 0.94 }),
+  mtRockDark:   new THREE.MeshStandardMaterial({ color: 0x454d58, roughness: 0.96 }),
+  mtSnow:       new THREE.MeshStandardMaterial({ color: 0xeaf4fc, roughness: 0.85 }),
+  mtGlow:       new THREE.MeshStandardMaterial({ color: 0xff6622, emissive: 0xff3300, emissiveIntensity: 1.6 }),
+  mtCrystal:    new THREE.MeshStandardMaterial({ color: 0xcc66ff, emissive: 0x9922ee, emissiveIntensity: 1.3 }),
   castleHPBarBg:new THREE.MeshBasicMaterial({ color: 0x330000 }),
   castleHPBarFg:new THREE.MeshBasicMaterial({ color: 0x22ff44, side: THREE.DoubleSide }),
   // Lanterns
@@ -1164,7 +1170,7 @@ for (const m of Object.values(M)) markMaterialShared(m);
 // biome ground textures), pure-glow emissives, and anything already mapped.
 (function applyStructuralGrain() {
   // stone → pitting speckles · wood/metal → grain banding · cloth → soft noise
-  const STONE = ['castleStone','castleLight','castleDark','towerBase','wallStone','rockMat','enemyRock','spikeMetal','catMetal'];
+  const STONE = ['castleStone','castleLight','castleDark','towerBase','wallStone','rockMat','enemyRock','spikeMetal','catMetal','mtRock','mtRockDark'];
   const WOOD  = ['catWood','ballistaWood','ballistaArm','mageStaff','trollClub','spikeBase','arcBelt','towerRoof','catapult'];
   const CLOTH = ['castleFlag','spCape','mageBeard','swShield','arcHood','orcTusk'];
   const tex = (opts) => _neutralPxTex(opts);
@@ -2245,6 +2251,155 @@ function buildPond(cells) {
   });
 }
 
+// ─────────────────────────────────────────────
+//  MOUNTAINS — Minecraft-style stepped box ranges outside the grid + interior outcrops
+// ─────────────────────────────────────────────
+const mountainGroup = new THREE.Group(); // border-range meshes live here (outside the playable grid)
+scene.add(mountainGroup);
+let _mountainsActive = false; // set by buildScenery(); cleared by map-editor Clear All
+
+// Per-biome mountain dressing: rock tints + peak cap style. Falls back to Meadow.
+const MOUNTAIN_STYLE = {
+  Meadow:   { rock: 0x5f6874, dark: 0x454d58, cap: 'snow', capMinH: 8.5 },
+  Desert:   { rock: 0xc09858, dark: 0x8f6f3c, cap: 'mesa' },
+  Icelands: { rock: 0x9db8cc, dark: 0x6e8ba0, cap: 'snow', capMinH: 0 },
+  Lava:     { rock: 0x2c1a12, dark: 0x1a0e08, cap: 'ember', glow: 0xff6622, glowEm: 0xff3300 },
+  Mordor:   { rock: 0x2e2620, dark: 0x1c1712, cap: 'ember', glow: 0xdd6611, glowEm: 0x993300 },
+  Doom:     { rock: 0x241018, dark: 0x140810, cap: 'ember', glow: 0xff2255, glowEm: 0xcc0033 },
+  Vibe:     { rock: 0x352050, dark: 0x221238, cap: 'crystal' },
+};
+
+// Quantize widths to half-blocks so tier steps read as hard Minecraft ledges
+const _mtQ = v => Math.max(0.5, Math.round(v * 2) / 2);
+
+// One stepped peak: 2-4 stacked shrinking boxes + a per-biome cap.
+// `face` is a unit vector pointing back INTO the field (aims ember crevices at the player).
+// Border peaks are far outside the shadow camera → shadows off keeps them cheap.
+function _mtPeak(px, pz, h, baseW, rng, style, face) {
+  const mesa  = style.cap === 'mesa';
+  const tiers = mesa ? 2 + Math.floor(rng() * 2) : 3 + Math.floor(rng() * 2); // mesa 2-3, rock 3-4
+  let cx = px, cz = pz;
+  let w = baseW, d = baseW * (0.8 + rng() * 0.4);
+  let y = -0.5; // base sinks below the void-plane top — no floating seams
+  let bw = 0, bd = 0;
+  for (let t = 0; t < tiers; t++) {
+    bw = _mtQ(w); bd = _mtQ(d);
+    const th = (h / tiers) * (mesa ? (t === 0 ? 1.3 : 0.75) : 0.8 + rng() * 0.5);
+    const m = new THREE.Mesh(box(bw, th, bd), t % 2 === 0 ? M.mtRock : M.mtRockDark);
+    m.position.set(cx, y + th / 2, cz);
+    m.castShadow = false; m.receiveShadow = false;
+    mountainGroup.add(m);
+    y += th;
+    // Volcanic biomes: emissive lava crevice glowing through a seam on the field-facing side
+    if (style.cap === 'ember' && t < 2 && rng() < 0.55) {
+      const cw = 0.3 + rng() * 0.3;
+      const cGeo = face[0] === 0 ? box(cw, th * 0.55, 0.3) : box(0.3, th * 0.55, cw);
+      const cm = new THREE.Mesh(cGeo, M.mtGlow);
+      cm.position.set(
+        cx + face[0] * (bw / 2) + (face[0] === 0 ? (rng() - 0.5) * bw * 0.5 : 0),
+        y - th * 0.45,
+        cz + face[1] * (bd / 2) + (face[1] === 0 ? (rng() - 0.5) * bd * 0.5 : 0));
+      cm.castShadow = false; cm.receiveShadow = false;
+      mountainGroup.add(cm);
+    }
+    // Next tier: hard shrink + small off-centre drift that always stays on top of this tier
+    const nw = w * ((mesa ? 0.74 : 0.60) + rng() * 0.12);
+    const nd = d * ((mesa ? 0.74 : 0.60) + rng() * 0.12);
+    cx += (rng() - 0.5) * Math.max(0, (bw - _mtQ(nw)) / 2 - 0.2);
+    cz += (rng() - 0.5) * Math.max(0, (bd - _mtQ(nd)) / 2 - 0.2);
+    w = nw; d = nd;
+  }
+  // Per-biome peak caps
+  if (style.cap === 'snow' && h >= (style.capMinH || 0)) {
+    const sw = _mtQ(bw * 0.9), sd = _mtQ(bd * 0.9), sh = 0.5 + rng() * 0.5;
+    const cap = new THREE.Mesh(box(sw, sh, sd), M.mtSnow);
+    cap.position.set(cx, y + sh / 2, cz);
+    cap.castShadow = false; cap.receiveShadow = false;
+    mountainGroup.add(cap);
+  } else if (mesa) {
+    // Desert mesa: flat caprock slab slightly wider than the top tier
+    const cap = new THREE.Mesh(box(bw + 0.5, 0.4, bd + 0.5), M.mtRockDark);
+    cap.position.set(cx, y + 0.2, cz);
+    cap.castShadow = false; cap.receiveShadow = false;
+    mountainGroup.add(cap);
+  } else if (style.cap === 'crystal') {
+    const spikes = 1 + Math.floor(rng() * 2);
+    for (let i = 0; i < spikes; i++) {
+      const cw2 = 0.35 + rng() * 0.3, chh = 1.4 + rng() * 1.8;
+      const sp = new THREE.Mesh(box(cw2, chh, cw2), M.mtCrystal);
+      sp.position.set(cx + (rng() - 0.5) * bw * 0.5, y + chh / 2 - 0.2, cz + (rng() - 0.5) * bd * 0.5);
+      sp.castShadow = false; sp.receiveShadow = false;
+      mountainGroup.add(sp);
+    }
+  }
+}
+
+// (Re)build the four border ranges. Deterministic per biome (seeded RNG), entirely
+// outside the playable grid, so gameplay/pathing can never be affected.
+function buildBorderMountains() {
+  for (let i = mountainGroup.children.length - 1; i >= 0; i--) {
+    const m = mountainGroup.children[i];
+    m.geometry.dispose();                 // materials are shared palette entries — keep them
+    mountainGroup.remove(m);
+  }
+  const bIdx  = Math.max(0, activeBiomeIdx);
+  const style = MOUNTAIN_STYLE[BIOMES[bIdx]?.name] || MOUNTAIN_STYLE.Meadow;
+  let seed = (0x5EED ^ ((bIdx + 1) * 0x9E3779B9)) >>> 0;
+  const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+
+  const W = CFG.GRID_W, H = CFG.GRID_H;
+  // Walk along one edge dropping peaks. Peak centres sit `1.6 + baseW/2 + jitter` beyond
+  // the grid edge, so even the widest base can never overhang a playable tile.
+  function range(edge, from, to, step0, step1, h0, h1, back) {
+    let t = from + rng() * 2;
+    while (t < to) {
+      const baseW = 3.5 + rng() * 3.0 + (back ? 1.5 : 0);
+      const h     = h0 + rng() * (h1 - h0);
+      const off   = 1.6 + baseW / 2 + rng() * 2.2 + (back ? 4.5 : 0);
+      if      (edge === 'N') _mtPeak(t, -off,           h, baseW, rng, style, [0, 1]);
+      else if (edge === 'S') _mtPeak(t, (H - 1) + off + 2.5, h, baseW, rng, style, [0, -1]);
+      else if (edge === 'W') _mtPeak(-off, t,           h, baseW, rng, style, [1, 0]);
+      else                   _mtPeak((W - 1) + off, t,  h, baseW, rng, style, [-1, 0]);
+      t += step0 + rng() * (step1 - step0);
+    }
+  }
+  range('N', -8, W + 8, 4.5, 7.0, 6.0, 10.5, false); // main backdrop the camera faces
+  range('N', -4, W + 4, 9.0, 13,  9.0, 14.0, true);  // taller second row for depth
+  range('W', -4, H + 4, 5.5, 8.5, 6.0, 11.0, false); // flank ranges
+  range('E', -4, H + 4, 5.5, 8.5, 6.0, 11.0, false);
+  range('S', -4, W + 4, 8.0, 12,  6.0,  9.5, false); // sparse — closes the horizon when rotating
+}
+
+// Interior rocky outcrop — 1-3 stacked stepped tiers on a single validated grass tile.
+// Blocks tower placement (tile becomes 'scenery') and pushes a unit-collision obstacle.
+function buildOutcrop(x, z, scale, rng) {
+  const g = new THREE.Group();
+  const tiers = 1 + Math.floor(rng() * 3);
+  let w = 1.0 + rng() * 0.25, d = 0.85 + rng() * 0.35, y = 0;
+  for (let t = 0; t < tiers; t++) {
+    const th = 0.4 + rng() * 0.3;
+    const m2 = mesh(box(w, th, d), t % 2 === 0 ? M.mtRock : M.mtRockDark);
+    m2.position.set(t ? (rng() - 0.5) * 0.15 : 0, y + th / 2, t ? (rng() - 0.5) * 0.15 : 0);
+    g.add(m2);
+    y += th; w *= 0.68 + rng() * 0.1; d *= 0.68 + rng() * 0.1;
+  }
+  // Rubble scattered at the base
+  const rub = 2 + Math.floor(rng() * 2);
+  for (let i = 0; i < rub; i++) {
+    const rw = 0.12 + rng() * 0.14, rh = 0.08 + rng() * 0.1;
+    const rb = mesh(box(rw, rh, rw), M.mtRockDark);
+    rb.position.set((rng() - 0.5) * 0.9, rh / 2, (rng() - 0.5) * 0.9);
+    g.add(rb);
+  }
+  g.position.set(x, 0, z);
+  g.scale.setScalar(scale);
+  scene.add(g);
+  staticObstacles.push({ x, z, r: 0.5 * scale });
+  const oc = grid[`${Math.round(x)},${Math.round(z)}`];
+  if (oc && oc.type === 'grass') oc.type = 'scenery';
+  return g;
+}
+
 function buildScenery() {
   _biomeTreeSpots.length = 0; // reset on each full scenery build
   // Union of ALL layout paths — these zones are always occupied across layout changes
@@ -2422,6 +2577,25 @@ function buildScenery() {
     }
   }
 
+  // ── 5b. ROCKY OUTCROPS — stepped mini-mountains that block tower placement.
+  // Validated against the union of ALL layout paths with a 2-tile buffer, so no
+  // layout swap can ever put a path under (or adjacent to) one.
+  const nearPath2 = new Set();
+  allPathKeys.forEach(key => {
+    const [pc, pr] = key.split(',').map(Number);
+    for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 2; dr++) nearPath2.add(`${pc + dc},${pr + dr}`);
+  });
+  const outcropTarget = 4 + Math.floor(rng() * 3); // 4-6 per map
+  for (let tries = 0, placed = 0; tries < 90 && placed < outcropTarget; tries++) {
+    const c = 4 + Math.floor(rng() * (CFG.GRID_W - 10));
+    const r = 4 + Math.floor(rng() * (CFG.GRID_H - 8));
+    if (nearPath2.has(`${c},${r}`) || !canPlace(c, r, 1)) continue;
+    const og = buildOutcrop(c, r, 0.85 + rng() * 0.45, rng);
+    initialScenery.push({ group: og, col: c, row: r, type: 'outcrop' });
+    markUsed(c, r, 1);
+    placed++;
+  }
+
   // ── 6. ROCKS — scattered boulders and clusters across the landscape
   for (let c = 2; c < CFG.GRID_W - 2; c += 2) {
     for (let r = 2; r < CFG.GRID_H - 2; r += 2) {
@@ -2478,6 +2652,10 @@ function buildScenery() {
       }
     }
   }
+
+  // ── 9. BORDER MOUNTAIN RANGES — dramatic stepped peaks outside the playable grid
+  _mountainsActive = true;
+  buildBorderMountains();
 }
 
 // ─────────────────────────────────────────────
@@ -3371,6 +3549,11 @@ function applyBiome(idx) {
 
   M.hillGrass.color.setHex(b.hill[0]);
   M.hillDark.color.setHex(b.hill[1]);
+  // Mountain rock tints (border ranges + interior outcrops share these)
+  const _ms = MOUNTAIN_STYLE[b.name] || MOUNTAIN_STYLE.Meadow;
+  M.mtRock.color.setHex(_ms.rock);
+  M.mtRockDark.color.setHex(_ms.dark);
+  if (_ms.glow) { M.mtGlow.color.setHex(_ms.glow); M.mtGlow.emissive.setHex(_ms.glowEm); }
   M.treeFoliage.color.setHex(b.foliage[0]);
   M.treeFoliage2.color.setHex(b.foliage[1]);
   if (b.treeMats) {
@@ -3396,6 +3579,9 @@ function applyBiome(idx) {
 
   // Swap tree meshes to match biome vegetation
   _rebuildBiomeTrees(i);
+  // Rebuild border mountain ranges with this biome's silhouette + dressing
+  // (guarded so map-editor Clear All keeps them gone until the next full scenery build)
+  if (_mountainsActive) buildBorderMountains();
 }
 
 // ─────────────────────────────────────────────
@@ -13986,6 +14172,13 @@ function _meClearAll() {
   // Remove all hill meshes
   for (const m of hillMeshes) { m.geometry.dispose(); scene.remove(m); }
   hillMeshes.length = 0;
+
+  // Remove border mountain ranges (outside-grid meshes; materials are shared palette entries)
+  for (let i = mountainGroup.children.length - 1; i >= 0; i--) {
+    mountainGroup.children[i].geometry.dispose();
+    mountainGroup.remove(mountainGroup.children[i]);
+  }
+  _mountainsActive = false;
 
   // Restore pond tiles to grass and remove water surface planes
   for (const pc of pondCells) {
