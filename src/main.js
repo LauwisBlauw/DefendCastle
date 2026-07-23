@@ -10078,6 +10078,37 @@ function buildSpawnQueue(waveNum) {
   return q;
 }
 
+// ── Endless wave modifiers ───────────────────────────────────────────────────
+// Every 4th wave in endless/free play (skipping %5 siege waves) rolls one modifier.
+// Applied as temporary multipliers AT SPAWN TIME on each orc (never mutates CFG)
+// and reset when the wave ends. Deterministic per wave number (salted per run) so
+// the next-wave preview can show the tag before the wave starts.
+const WAVE_MODIFIERS = [
+  { id: 'SWIFT',    icon: '💨', label: 'SWIFT',    desc: 'Enemy speed ×1.25, rewards ×1.15', speed: 1.25, reward: 1.15 },
+  { id: 'FRENZY',   icon: '🌪️', label: 'FRENZY',   desc: 'Enemies spawn 30% faster',          spawnInt: 0.7 },
+  { id: 'BOUNTY',   icon: '💰', label: 'BOUNTY',   desc: 'Rewards ×1.5',                      reward: 1.5 },
+  { id: 'IRONHIDE', icon: '🛡️', label: 'IRONHIDE', desc: 'Enemy HP ×1.2, rewards ×1.25',      hp: 1.2, reward: 1.25 },
+];
+let _waveMod = null;                                    // active modifier for the running wave
+let _waveModSalt = (Math.random() * 0xffffffff) >>> 0;  // per-run salt → different rolls each run
+
+function _endlessLikeMode() { return !(currentLevel && currentLevel.id !== 'endless'); }
+
+function waveModifierFor(n) {
+  if (!_endlessLikeMode()) return null;
+  if (n < 4 || n % 4 !== 0 || n % 5 === 0) return null;
+  let s = ((n * 2654435761) ^ _waveModSalt) >>> 0;
+  s = (s * 1664525 + 1013904223) >>> 0;
+  return WAVE_MODIFIERS[s % WAVE_MODIFIERS.length];
+}
+
+function _applyWaveModToOrc(o) {
+  if (!_waveMod || !o) return;
+  if (_waveMod.speed)  o.speed  = o.speed * _waveMod.speed;
+  if (_waveMod.hp)     { o.maxHp = Math.round(o.maxHp * _waveMod.hp); o.hp = Math.round(o.hp * _waveMod.hp); }
+  if (_waveMod.reward) o.reward = Math.round(o.reward * _waveMod.reward);
+}
+
 function updateSpawner(dt) {
   if (!waveActive || spawnQueue.length === 0) return;
   spawnTimer -= dt;
@@ -10090,10 +10121,12 @@ function updateSpawner(dt) {
       return;
     }
     spawnQueue.pop();
+    const _nOrcsBefore = orcs.length;
     spawnOrc(type);
+    if (_waveMod && orcs.length > _nOrcsBefore) _applyWaveModToOrc(orcs[orcs.length - 1]);
     updateHUD();
     // Enemies spawn faster in later waves — minimum tightened from 0.65s → 0.50s for late-game pressure
-    spawnTimer = Math.max(0.50, CFG.SPAWN_INTERVAL - (wave - 1) * 0.05);
+    spawnTimer = Math.max(0.50, CFG.SPAWN_INTERVAL - (wave - 1) * 0.05) * (_waveMod?.spawnInt || 1);
   }
 }
 
@@ -10120,6 +10153,7 @@ function checkWaveEnd() {
   if (spawnQueue.some(t => t !== 'pause')) return; // still enemies to spawn
   if (orcs.some(o => o.alive)) return;
   waveActive = false;
+  _waveMod = null; // wave modifier only lives for the duration of its wave
   // Release all lingering attack slots so defenders aren't locked between waves
   for (const o of orcs) {
     if (o.fightingDefender) { releaseAttackSlot(o.fightingDefender, o); o.fightingDefender = null; o.attackSlot = -1; }
@@ -10465,8 +10499,9 @@ function updateWavePreview() {
   const next = wave + 1;
   const isBossWave = !!(currentLevel && currentLevel.id !== 'endless'
     && next === currentLevel.endWave && currentLevel.boss);
+  const nextMod = waveModifierFor(next);
   // Rebuild the DOM only when the upcoming wave actually changes
-  const key = `${next}|${currentLevel?.id ?? 'free'}|${isBossWave}`;
+  const key = `${next}|${currentLevel?.id ?? 'free'}|${isBossWave}|${nextMod?.id ?? ''}`;
   if (_wavePreviewKey === key) return;
   _wavePreviewKey = key;
 
@@ -10477,6 +10512,7 @@ function updateWavePreview() {
   const tags = [];
   if (next % 5 === 0) tags.push('<span class="wp-tag wp-siege">⚔️ SIEGE — 40% bigger, elites!</span>');
   if (isBossWave)     tags.push(`<span class="wp-tag wp-boss">👑 BOSS — ${currentLevel.boss.name}</span>`);
+  if (nextMod)        tags.push(`<span class="wp-tag wp-mod">${nextMod.icon} ${nextMod.label} — ${nextMod.desc}</span>`);
   elWavePreview.innerHTML =
     `<div class="wp-title">⚔️ Next: Wave ${next}</div>` +
     `<div class="wp-chips">${chips}</div>` +
@@ -10703,7 +10739,9 @@ function showWaveBanner(n) {
   }
   // Endless-mode telegraph: append a "what's coming" sub-label after wave 12.
   // Helps the player decide where to spend gold before the wave starts.
-  const sub = _endlessTelegraph(n);
+  let sub = _endlessTelegraph(n);
+  // Wave-modifier tag (endless): show what twist this wave carries
+  if (_waveMod) sub = `${_waveMod.icon} ${_waveMod.label} — ${_waveMod.desc}` + (sub ? `  ·  ${sub}` : '');
   if (sub) {
     _bannerSubLabel.textContent = sub;
     elBanner.appendChild(_bannerSubLabel);
@@ -11000,6 +11038,7 @@ const _runStats = { goldEarned: 0, defendersBuilt: 0, startMs: 0 };
 function _resetRunState() {
   gameOver = false;
   waveActive = false;
+  _waveMod = null;
   castleHp = CFG.CASTLE_MAX_HP;
   kills = 0;
   _runStats.goldEarned = 0;
@@ -15809,6 +15848,9 @@ function _cmpOutcome(a, b) {
     get orcs() { return orcs; },
     get defenders() { return defenders; },
     sellAllOfType,
+    waveModifierFor,
+    get waveMod() { return _waveMod; },
+    forceWaveMod(id) { _waveMod = WAVE_MODIFIERS.find(m => m.id === id) || null; return _waveMod; },
     // Map-editor internals for automated editor testing
     me: {
       setTool: _meSetTool,
@@ -17047,6 +17089,8 @@ elBtnStart.addEventListener('click', () => {
     // layout-derived song override it. setSong is idempotent so this is a cheap no-op.
     SND.setSong(LEVEL_SONGS[currentLevel.id] || 'classic');
   }
+  // Endless wave modifier: rolled deterministically per wave (null in story levels)
+  _waveMod = waveModifierFor(wave);
   spawnQueue = buildSpawnQueue(wave);
   // Feature 5: siege wave — add 40% more enemies
   const isSiegeWave = wave % 5 === 0;
