@@ -10229,13 +10229,15 @@ function checkWaveEnd() {
     ? (wave === currentLevel.endWave - 1)             // story: breather before the boss wave
     : (wave % 3 === 0 && wave % 5 !== 0);             // endless/free play: unchanged cadence
   if (merchantDue && !isLastOfLevel) {
+    // Defer the wave-complete toast: showing it under the merchant modal wastes it.
+    // The merchant close handlers (buy/skip) display it once the modal is gone.
+    _pendingWaveToast = `Wave ${wave} complete! +${bonus}🟡 gold bonus`;
     showMerchant();
   } else {
     document.getElementById('btn-start').disabled = false;
     updateHUD(); // re-run now that Start is live: ready-pulse + next-wave preview
+    showTooltip(`Wave ${wave} complete! +${bonus}🟡 gold bonus`, 3000);
   }
-
-  showTooltip(`Wave ${wave} complete! +${bonus}🟡 gold bonus`, 3000);
 
   // In endless / pre-level modes: pre-apply next wave's layout/biome so the player builds on the right grid.
   // Inside a level, the biome and layout are fixed for the whole level — skip the rotation.
@@ -10761,6 +10763,16 @@ const MERCHANT_POOL = [
   { icon: '💎', name: 'Dragon Hoard',   desc: 'Double gold bonus next wave',       apply: () => { doubleBonusWave = true; } },
 ];
 
+// Wave-complete toast deferred while the merchant modal is up (see endWave).
+let _pendingWaveToast = null;
+function _flushPendingWaveToast(delayMs = 0) {
+  if (!_pendingWaveToast) return;
+  const msg = _pendingWaveToast;
+  _pendingWaveToast = null;
+  if (delayMs > 0) setTimeout(() => showTooltip(msg, 2400), delayMs);
+  else showTooltip(msg, 2400);
+}
+
 function showMerchant() {
   const modal = document.getElementById('merchant');
   const offersEl = document.getElementById('merchant-offers');
@@ -10779,6 +10791,7 @@ function showMerchant() {
       elBtnStart.disabled = false;
       updateHUD(); // refresh ready-pulse + next-wave preview now that Start is live again
       showTooltip(`${offer.icon} ${offer.name} activated!`, 2000);
+      _flushPendingWaveToast(2100); // deferred wave-complete toast, after the purchase toast
     });
     offersEl.appendChild(card);
   });
@@ -10791,6 +10804,7 @@ document.getElementById('btn-merchant-skip').addEventListener('click', () => {
   document.getElementById('merchant').classList.remove('visible');
   elBtnStart.disabled = false;
   updateHUD(); // refresh ready-pulse + next-wave preview
+  _flushPendingWaveToast();
 });
 
 // Feature 2: persistent high score
