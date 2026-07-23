@@ -2409,6 +2409,11 @@ function buildScenery() {
     expandPath(L.b).forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
     expandPath(L.c).forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
   }
+  // Also reserve any editor-drawn paths so regenerated scenery/outcrops never land
+  // on a hand-drawn custom-map route (no-op in normal play, where _mePaths is empty).
+  for (let pi = 0; pi < 3; pi++) {
+    for (const [c, r] of (_mePaths?.[pi] || [])) allPathKeys.add(`${c},${r}`);
+  }
   // Castle zone
   for (let c = 65; c <= 71; c++) for (let r = 22; r <= 32; r++) allPathKeys.add(`${c},${r}`);
   // 1-tile buffer around all path/castle tiles
@@ -14315,6 +14320,13 @@ function _meLoadMap(data) {
   }
   // Rebuild path lanterns (Clear All removed them)
   buildPathLanterns();
+  // Restore the cosmetic border-mountain backdrop that _meClearAll dropped. These
+  // ranges sit entirely outside the playable grid, so they never touch the author's
+  // layout or paths — a loaded map without them just looks flat at the horizon.
+  // (Interior outcrops stay author-controlled: custom maps show only placed items,
+  // same as trees/rocks, so we intentionally don't regenerate them here.)
+  _mountainsActive = true;
+  buildBorderMountains();
   _meLoadedName = data.name;
   _meNameInput.value = data.name;
 }
