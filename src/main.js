@@ -5820,6 +5820,18 @@ const SND = (() => {
       [0,55,115,180].forEach((ms, i) =>
         setTimeout(() => osc(1760 + i * 220,'sine',0.05,0.045 - i*0.005,2640 + i*180), ms));
     },
+    // Merchant arrives — mysterious two-tone shop bell with a soft shimmer
+    merchantOpen() {
+      [[0,659],[140,880],[300,1175]].forEach(([ms,f]) =>
+        setTimeout(() => osc(f,'triangle',0.22,0.10,f*1.02), ms));
+      setTimeout(() => noise(0.14,0.03,2600,'highpass'), 90);
+    },
+    // Merchant purchase — coin clink + confirming rising blip
+    merchantBuy() {
+      osc(1760,'sine',0.05,0.05,2640); osc(2640,'sine',0.035,0.035,3520);
+      setTimeout(() => osc(880,'triangle',0.14,0.09,1175), 70);
+      setTimeout(() => osc(1175,'triangle',0.16,0.08,1568), 170);
+    },
     // Level victory fanfare — full triumphant phrase (richer than waveComplete)
     levelVictory() {
       [[0,523],[140,659],[280,784],[420,1047],[640,1319]].forEach(([ms,f]) =>
@@ -10761,6 +10773,7 @@ function showMerchant() {
     card.className = 'merchant-card';
     card.innerHTML = `<div class="merchant-icon">${offer.icon}</div><div class="merchant-name">${offer.name}</div><div class="merchant-desc">${offer.desc}</div>`;
     card.addEventListener('click', () => {
+      SND.merchantBuy();
       offer.apply();
       modal.classList.remove('visible');
       elBtnStart.disabled = false;
@@ -10770,9 +10783,11 @@ function showMerchant() {
     offersEl.appendChild(card);
   });
   modal.classList.add('visible');
+  SND.merchantOpen();
 }
 
 document.getElementById('btn-merchant-skip').addEventListener('click', () => {
+  SND.btnClick();
   document.getElementById('merchant').classList.remove('visible');
   elBtnStart.disabled = false;
   updateHUD(); // refresh ready-pulse + next-wave preview
