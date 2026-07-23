@@ -8383,8 +8383,8 @@ function addUpgradeIndicator(def) {
   def.group.traverse(child => { if (child.userData.isUpgradeGem) toRemove.push(child); });
   toRemove.forEach(child => { def.group.remove(child); child.geometry.dispose(); });
   // Add gems based on level
-  const gemCount = def.level - 1; // level 2 = 1 gem, level 3 = 2 gems
-  const colors = [0xffd040, 0xff8820]; // yellow, orange
+  const gemCount = def.level - 1; // lv2 = 1 gem, lv3 = 2, lv4 = 3
+  const colors = [0xffd040, 0xff8820, 0x33e0ff]; // yellow, orange, elite prismatic-cyan
   for (let i = 0; i < gemCount; i++) {
     const gemGeo = box(0.11, 0.11, 0.11);
     const gemMat = new THREE.MeshStandardMaterial({ color: colors[i], emissive: colors[i], emissiveIntensity: 1.8 });
@@ -8427,17 +8427,18 @@ function tryUpgradeDefender(col, row) {
   if (def.type === 'spiketrap') { showTooltip('Spike traps cannot be upgraded!', 1800); return; }
   if (def.type === 'wall') { showTooltip('Walls cannot be upgraded!', 1800); return; }
   const level = def.level || 1;
-  if (level >= 3) {
+  if (level >= 4) {
     showTooltip('Max level!', 1500);
     return;
   }
-  const killsNeeded = level === 1 ? 10 : 25;
+  const killsNeeded = level === 1 ? 10 : level === 2 ? 25 : 50; // lv3→4 (elite) demands 50
   if ((def.kills || 0) < killsNeeded) {
     showTooltip(`Need ${killsNeeded} kills to upgrade! (${def.kills || 0}/${killsNeeded})`, 2000);
     return;
   }
   const isBuilding = ['tower', 'catapult', 'archer', 'mage', 'ballista'].includes(def.type);
-  const cost = CFG.COSTS[def.type] * level * (isBuilding ? 2 : 1);
+  let cost = CFG.COSTS[def.type] * level * (isBuilding ? 2 : 1);
+  if (level === 3) cost = Math.round(cost * 1.5); // level-4 elite premium
   if (gold < cost) {
     showTooltip(`Not enough gold! Need ${cost}🟡 to upgrade`, 2000);
     return;
@@ -12438,19 +12439,20 @@ function _refreshDefPanel() {
   _dpRate.textContent  = d.rate  != null ? d.rate.toFixed(1) + '/s'    : '—';
   // Kill counter in name area
   const killCount = d.kills || 0;
-  _dpStars.textContent = (lv === 3 ? '★★★' : lv === 2 ? '★★' : '★') + (killCount > 0 ? `  💀${killCount}` : '');
+  _dpStars.textContent = (lv >= 4 ? '★★★★' : lv === 3 ? '★★★' : lv === 2 ? '★★' : '★') + (killCount > 0 ? `  💀${killCount}` : '');
 
   // Upgrade button
   if (d.type === 'spiketrap' || d.type === 'wall') {
     _dpUpgradeBtn.disabled = true;
     _dpUpgradeBtn.textContent = 'No Upgrade';
-  } else if (lv >= 3) {
+  } else if (lv >= 4) {
     _dpUpgradeBtn.disabled = true;
     _dpUpgradeBtn.textContent = 'Max Level';
   } else {
     const isBuilding = ['tower', 'catapult', 'archer', 'mage', 'ballista'].includes(d.type);
-    const cost = d.type === 'wall' ? CFG.COSTS.wall * lv : CFG.COSTS[d.type] * lv * (isBuilding ? 2 : 1);
-    const killsNeeded = d.type === 'wall' ? (lv === 1 ? 0 : 15) : (lv === 1 ? 10 : 25);
+    let cost = d.type === 'wall' ? CFG.COSTS.wall * lv : CFG.COSTS[d.type] * lv * (isBuilding ? 2 : 1);
+    if (lv === 3) cost = Math.round(cost * 1.5); // level-4 elite premium (mirrors tryUpgradeDefender)
+    const killsNeeded = d.type === 'wall' ? (lv === 1 ? 0 : 15) : (lv === 1 ? 10 : lv === 2 ? 25 : 50);
     const myKills = d.kills || 0;
     const killsOk = myKills >= killsNeeded;
     _dpUpgradeBtn.disabled = gold < cost || !killsOk;
