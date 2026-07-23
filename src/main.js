@@ -12098,6 +12098,17 @@ window.addEventListener('keydown', (e) => {
       if (_dpUpgradeBtn && !_dpUpgradeBtn.disabled) _dpUpgradeBtn.click();
       return;
     }
+    if ((e.key === 'x' || e.key === 'X') && e.shiftKey) {
+      // Shift+X → sell ALL defenders of the selected unit's type
+      e.preventDefault();
+      if (_dpSellBtn && _dpSellBtn.style.display !== 'none') {
+        const type = selectedDef.type;
+        selectedDef = null;
+        _defPanel.style.display = 'none';
+        sellAllOfType(type);
+      }
+      return;
+    }
     if (e.key === 'x' || e.key === 'X' || e.key === 'Delete') {
       e.preventDefault();
       if (_dpSellBtn && _dpSellBtn.style.display !== 'none') _dpSellBtn.click();
@@ -12204,25 +12215,53 @@ canvas.addEventListener('mousemove', (e) => {
 });
 canvas.addEventListener('mouseup', () => { _paintLastKey = null; });
 
+// Core removal + refund shared by single-sell and sell-all. Returns the refund
+// (0 = not sellable). Skips wall-cache rebuild when `deferWallCache` — callers
+// batching wall sells rebuild once afterwards.
+function _sellDefender(def, deferWallCache = false) {
+  if (!def || !def.alive || def.type === 'spiketrap') return 0;
+  const refund = Math.floor(totalCostPaid(def) * 0.5);
+  gold += refund;
+  if (def.hpBar) { def.hpBar.bg.visible = false; def.hpBar.fg.visible = false; }
+  if (def._rallyMarker) { scene.remove(def._rallyMarker); def._rallyMarker = null; }
+  occupied.delete(`${def.col},${def.row}`);
+  const sellPos = posAbove(def.group.position, 1.5);
+  scene.remove(def.group); disposeGroup(def.group);
+  defenders.splice(defenders.indexOf(def), 1);
+  if (def.type === 'wall' && !deferWallCache) _rebuildWallCache();
+  spawnGoldPopup(refund, sellPos);
+  return refund;
+}
+
 function sellDefenderAt(col, row) {
   const key = `${col},${row}`;
   if (!occupied.has(key)) return;
   const def = defenders.find(d => d.col === col && d.row === row && d.alive);
   if (!def) return;
   if (def.type === 'spiketrap') { showTooltip('Spike traps cannot be sold!', 1800); return; }
-  const refund = Math.floor(totalCostPaid(def) * 0.5);
-  gold += refund;
+  const refund = _sellDefender(def);
   updateHUD();
-  if (def.hpBar) { def.hpBar.bg.visible = false; def.hpBar.fg.visible = false; }
-  if (def._rallyMarker) { scene.remove(def._rallyMarker); def._rallyMarker = null; }
-  occupied.delete(key);
-  const sellPos = posAbove(def.group.position, 1.5);
-  scene.remove(def.group); disposeGroup(def.group);
-  defenders.splice(defenders.indexOf(def), 1);
-  if (def.type === 'wall') _rebuildWallCache();
-  spawnGoldPopup(refund, sellPos);
   SND.sellRefund();
   showTooltip(`Sold for ${refund}🟡`, 1500);
+}
+
+// Sell every living defender of `type` with the same refund rules (Shift+X with
+// a unit selected). Returns {count, total} for the summary toast.
+function sellAllOfType(type) {
+  if (!type || type === 'spiketrap') { showTooltip('Spike traps cannot be sold!', 1800); return { count: 0, total: 0 }; }
+  const targets = defenders.filter(d => d.alive && d.type === type);
+  let total = 0, count = 0;
+  for (const def of targets) {
+    total += _sellDefender(def, true); // targets pre-filtered: every call sells
+    count++;
+  }
+  if (count === 0) return { count: 0, total: 0 };
+  if (type === 'wall') _rebuildWallCache();
+  updateHUD();
+  SND.sellRefund();
+  const name = (_DP_NAMES[type] || type).toLowerCase();
+  showTooltip(`Sold ${count} ${name}${count > 1 ? 's' : ''} for ${total}🟡`, 2200);
+  return { count, total };
 }
 
 // ─────────────────────────────────────────────
@@ -12346,6 +12385,7 @@ function _refreshDefPanel() {
   _dpSellBtn.style.display = d.type === 'spiketrap' ? 'none' : '';
   const refund = Math.floor(totalCostPaid(d) * 0.5);
   _dpSellBtn.textContent = `Sell  +${refund}🟡`;
+  _dpSellBtn.title = 'X: sell this unit — Shift+X: sell ALL of this type';
 
   // Rally button — only soldiers (knight/swordsman/spearman/archer). Three visual states:
   // (idle): "Set Rally" — click to enter targeting mode
@@ -15737,6 +15777,7 @@ function _cmpOutcome(a, b) {
     scene, camera, controls, THREE,
     get orcs() { return orcs; },
     get defenders() { return defenders; },
+    sellAllOfType,
     // Map-editor internals for automated editor testing
     me: {
       setTool: _meSetTool,
