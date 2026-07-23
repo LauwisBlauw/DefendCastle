@@ -8442,6 +8442,8 @@ function tryUpgradeDefender(col, row) {
     return;
   }
   gold -= cost;
+  _bumpStat('goldSpent', cost);
+  _bumpStat('upgradesDone', 1);
   def.level = level + 1;
   SND.upgrade();
   // Boost stats using per-type multipliers from CFG.UPGRADE_STATS
@@ -8512,8 +8514,8 @@ function place(tool, col, row) {
     showTooltip(`Not enough gold! Need ${cost}🟡`, 2000);
     return;
   }
-  if (!testMode) gold -= cost;
-  if (!testMode) _runStats.defendersBuilt++;
+  if (!testMode) { gold -= cost; _bumpStat('goldSpent', cost); }
+  if (!testMode) { _runStats.defendersBuilt++; _bumpStat('defendersBuilt', 1); }
   occupied.add(key);
 
   if      (tool === 'wall')      buildWall(col, row);
@@ -8837,6 +8839,7 @@ function dealDamage(orc, dmg, attacker = null) {
     _bumpStat('kills', 1);
     if (orc.isLevelBoss) {
       _unlockAchievement('bossKill');
+      _bumpStat('bossKills', 1);
       // Flawless: no defender deaths during this wave AND boss is now dead
       if (waveDefDeaths === 0) _unlockAchievement('flawlessBoss');
     }
@@ -10859,6 +10862,14 @@ const ACHIEVEMENTS = [
   { id: 'allLevels3Star', name: 'Perfect Run',          desc: 'Earn 3 stars on all 5 levels',      icon: '🏆' },
   { id: 'endlessWave20',  name: 'Eternal Defender',     desc: 'Reach wave 20 in endless mode',     icon: '♾️' },
   { id: 'rallyMaster',    name: 'Tactical Genius',      desc: 'Set a soldier rally point',         icon: '🚩' },
+  { id: 'goldSpender1k',  name: 'Big Spender',          desc: 'Spend 1,000 gold in total',         icon: '🪙' },
+  { id: 'goldSpender10k', name: 'Royal Treasury',       desc: 'Spend 10,000 gold in total',        icon: '👛' },
+  { id: 'builder25',      name: 'Field Engineer',       desc: 'Build 25 defenders',                icon: '🔨' },
+  { id: 'builder100',     name: 'Master Architect',     desc: 'Build 100 defenders',               icon: '🏗️' },
+  { id: 'bossSlayer5',    name: 'Boss Breaker',         desc: 'Defeat 5 level bosses',             icon: '⚒️' },
+  { id: 'endlessWave30',  name: 'Unbreakable',          desc: 'Reach wave 30 in endless mode',     icon: '🌀' },
+  { id: 'upgrader10',     name: 'Veteran Trainer',      desc: 'Upgrade units 10 times',            icon: '📈' },
+  { id: 'seller10',       name: 'Shrewd Merchant',      desc: 'Sell 10 defenders',                 icon: '⚖️' },
 ];
 const _ACHIEVEMENT_BY_ID = Object.fromEntries(ACHIEVEMENTS.map(a => [a.id, a]));
 
@@ -10898,6 +10909,18 @@ function _bumpStat(name, delta = 1) {
     if (v >= 1000) _unlockAchievement('slayer1000');
   } else if (name === 'wallsBuilt') {
     if (v >= 50) _unlockAchievement('wallEnjoyer');
+  } else if (name === 'goldSpent') {
+    if (v >= 1000)  _unlockAchievement('goldSpender1k');
+    if (v >= 10000) _unlockAchievement('goldSpender10k');
+  } else if (name === 'defendersBuilt') {
+    if (v >= 25)  _unlockAchievement('builder25');
+    if (v >= 100) _unlockAchievement('builder100');
+  } else if (name === 'bossKills') {
+    if (v >= 5) _unlockAchievement('bossSlayer5');
+  } else if (name === 'upgradesDone') {
+    if (v >= 10) _unlockAchievement('upgrader10');
+  } else if (name === 'unitsSold') {
+    if (v >= 10) _unlockAchievement('seller10');
   }
   saveAchievements();
 }
@@ -11298,9 +11321,16 @@ function showStats() {
   // ── Achievements grid ──
   // Progress counts for counter-based achievements ("47 / 100" beats a bare lock)
   const ACH_PROGRESS = {
-    centurion:   () => [achievementState.stats.kills || 0, 100],
-    slayer1000:  () => [achievementState.stats.kills || 0, 1000],
-    wallEnjoyer: () => [achievementState.stats.wallsBuilt || 0, 50],
+    centurion:      () => [achievementState.stats.kills || 0, 100],
+    slayer1000:     () => [achievementState.stats.kills || 0, 1000],
+    wallEnjoyer:    () => [achievementState.stats.wallsBuilt || 0, 50],
+    goldSpender1k:  () => [achievementState.stats.goldSpent || 0, 1000],
+    goldSpender10k: () => [achievementState.stats.goldSpent || 0, 10000],
+    builder25:      () => [achievementState.stats.defendersBuilt || 0, 25],
+    builder100:     () => [achievementState.stats.defendersBuilt || 0, 100],
+    bossSlayer5:    () => [achievementState.stats.bossKills || 0, 5],
+    upgrader10:     () => [achievementState.stats.upgradesDone || 0, 10],
+    seller10:       () => [achievementState.stats.unitsSold || 0, 10],
   };
   const achHtml = ACHIEVEMENTS.map(a => {
     const have = achievementState.unlocked.has(a.id);
@@ -12230,6 +12260,7 @@ function _sellDefender(def, deferWallCache = false) {
   defenders.splice(defenders.indexOf(def), 1);
   if (def.type === 'wall' && !deferWallCache) _rebuildWallCache();
   spawnGoldPopup(refund, sellPos);
+  _bumpStat('unitsSold', 1);
   return refund;
 }
 
@@ -17066,6 +17097,7 @@ elBtnStart.addEventListener('click', () => {
   _criticalWarned = false;
   // Endless mode: reaching wave 20 unlocks "Eternal Defender"
   if (currentLevel?.id === 'endless' && wave >= 20) _unlockAchievement('endlessWave20');
+  if (currentLevel?.id === 'endless' && wave >= 30) _unlockAchievement('endlessWave30');
   waveStartHp   = castleHp;
   waveDefDeaths = 0;
   waveStartTime = Date.now();
