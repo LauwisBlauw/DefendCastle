@@ -11076,10 +11076,32 @@ function _resetRunState() {
   updateHUD?.();
 }
 
+// First-session onboarding: show a one-time "how to play" card when the player
+// first enters a real game. Persisted so it never nags returning players.
+function _maybeShowOnboarding() {
+  let done = false;
+  try { done = localStorage.getItem('td_onboarded') === '1'; } catch {}
+  if (done) return;
+  const card = document.getElementById('onboard-card');
+  if (!card) return;
+  // Delay a beat so it lands after the level's own intro tooltip/banner
+  setTimeout(() => { if (!gameOver && !testMode && !mapEditorMode && !studioMode) card.style.display = 'block'; }, 700);
+}
+(function _wireOnboarding() {
+  const card = document.getElementById('onboard-card');
+  const btn = document.getElementById('onboard-dismiss');
+  btn?.addEventListener('click', () => {
+    if (card) card.style.display = 'none';
+    try { localStorage.setItem('td_onboarded', '1'); } catch {}
+    SND.btnClick?.();
+  });
+})();
+
 function startLevel(id) {
   const lvl = (id === 'endless') ? ENDLESS_LEVEL : LEVELS.find(L => L.id === id);
   if (!lvl) return;
   _mePlayingMapName = null; // leaving any custom-map play session
+  _maybeShowOnboarding();
   if (!isLevelUnlocked(id)) return;
   applyDifficulty();                    // ensure difficultyMult + music mood reflect the current pick
   _levelRunStartMs = Date.now();        // start clock for "best time"

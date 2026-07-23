@@ -2245,6 +2245,32 @@
       box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     }
     #me-return-btn:hover { background: rgba(0,90,150,0.95); color: #fff; }
+    /* First-session onboarding card */
+    #onboard-card {
+      position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+      z-index: 1400; width: min(560px, 92vw);
+      background: linear-gradient(160deg, rgba(14,26,48,0.97), rgba(8,16,32,0.97));
+      border: 2px solid rgba(90,170,255,0.55); border-radius: 16px;
+      box-shadow: 0 12px 44px rgba(0,0,0,0.6); padding: 18px 20px 16px;
+      font-family: 'Nunito', sans-serif; color: #dcebff;
+      animation: ob-pop 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    }
+    @keyframes ob-pop { from { opacity:0; transform: translateX(-50%) translateY(14px) scale(0.96); } to { opacity:1; transform: translateX(-50%) translateY(0) scale(1); } }
+    #onboard-card .ob-title {
+      font-family: 'Fredoka One', sans-serif; font-size: 20px; color: #ffd86a;
+      text-align: center; margin-bottom: 12px; letter-spacing: 0.02em;
+    }
+    #onboard-card .ob-tips { display: flex; flex-direction: column; gap: 9px; margin-bottom: 14px; }
+    #onboard-card .ob-tip { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.45; }
+    #onboard-card .ob-ico { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
+    #onboard-card .ob-tip b { color: #9fd0ff; }
+    #onboard-dismiss {
+      display: block; width: 100%; padding: 10px; border-radius: 10px; cursor: pointer;
+      font-family: 'Fredoka One', sans-serif; font-size: 15px; color: #08210a;
+      background: linear-gradient(135deg, #7be07b, #34c455);
+      border: 2px solid rgba(120,255,150,0.6); transition: all 0.14s;
+    }
+    #onboard-dismiss:hover { filter: brightness(1.1); transform: translateY(-1px); }
     #me-play-btn {
       background: rgba(0,140,40,0.5); border: 2px solid rgba(40,220,80,0.55); color: #aaffaa;
       box-shadow: 0 0 12px rgba(40,200,80,0.3);
@@ -3128,6 +3154,17 @@
 
   <!-- Floating return button shown during map-editor Test Play -->
   <button id="me-return-btn" style="display:none">🗺 Back to Editor</button>
+
+  <!-- First-session onboarding card (shown once, then td_onboarded is persisted) -->
+  <div id="onboard-card" style="display:none" role="dialog" aria-modal="true" aria-label="How to play">
+    <div class="ob-title">⚔️ Defend the Castle!</div>
+    <div class="ob-tips">
+      <div class="ob-tip"><span class="ob-ico">🏰</span><span><b>Build defenders</b> from the bottom panel — click a card, then a tile. Walls block roads; towers &amp; troops fight.</span></div>
+      <div class="ob-tip"><span class="ob-ico">▶️</span><span><b>Press Start</b> (or <b>Enter</b>) to send the next wave when you're ready. The card up top previews what's coming.</span></div>
+      <div class="ob-tip"><span class="ob-ico">⏩</span><span><b>Speed &amp; Pause</b> are top-right (or <b>P</b>). Select a unit to <b>upgrade</b> (U) or <b>sell</b> (X).</span></div>
+    </div>
+    <button id="onboard-dismiss">Got it — let's go!</button>
+  </div>
 
   <!-- BOTTOM BUILD PANEL -->
   <div id="build-panel">
