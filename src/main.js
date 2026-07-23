@@ -498,6 +498,7 @@ let _mePaths        = [[], [], []]; // ordered [col,row] per path A/B/C (index 0
 let _mePathTiles    = [{}, {}, {}]; // quick lookup: key->`col,row` per path index
 let _meSavedMaps    = [];
 let _meLoadedName   = null;
+let _mePlayingMapName = null; // set when playing a specific saved map (for per-map best-wave records); cleared on mode changes
 let _meHoverMesh    = null;
 // Undo/redo stacks — each entry is { undo, redo }: paired closures that reverse
 // or re-apply ONE editor action. Capped at 50 to bound memory.
@@ -11077,6 +11078,7 @@ function _resetRunState() {
 function startLevel(id) {
   const lvl = (id === 'endless') ? ENDLESS_LEVEL : LEVELS.find(L => L.id === id);
   if (!lvl) return;
+  _mePlayingMapName = null; // leaving any custom-map play session
   if (!isLevelUnlocked(id)) return;
   applyDifficulty();                    // ensure difficultyMult + music mood reflect the current pick
   _levelRunStartMs = Date.now();        // start clock for "best time"
@@ -11501,6 +11503,15 @@ function hideLevelComplete() {
 function triggerGameOver() {
   gameOver = true;
   SND.gameOver();
+  // Custom-map play: record the best wave reached for this saved map
+  if (_mePlayingMapName) {
+    const m = _meSavedMaps.find(x => x.name === _mePlayingMapName);
+    if (m && wave > (m.bestWave || 0)) {
+      m.bestWave = wave;
+      saveSave('td_saved_maps', _meSavedMaps);
+    }
+    _mePlayingMapName = null; // one record per play session
+  }
   elGameOver.classList.add('visible');
   elBtnStart.disabled = true;
   // Mode-specific stats line
@@ -14506,15 +14517,21 @@ function _meRefreshMapList() {
     row.className = 'me-map-entry';
     const loadBtn = document.createElement('button');
     loadBtn.className = 'me-map-load-btn' + (map.name === _meLoadedName ? ' active' : '');
-    loadBtn.textContent = map.name;
-    loadBtn.title = `Biome: ${BIOMES[map.biome]?.name ?? '?'} · ${map.items.length} objects`;
+    loadBtn.textContent = map.name + (map.bestWave ? ` · 🏆${map.bestWave}` : '');
+    loadBtn.title = `Biome: ${BIOMES[map.biome]?.name ?? '?'} · ${map.items.length} objects${map.bestWave ? ` · best: wave ${map.bestWave}` : ''}`;
     loadBtn.addEventListener('click', () => { _meLoadMap(map); _meRefreshMapList(); });
+    // ▶ Quick-play: load the map and jump straight into test-play
+    const playBtn = document.createElement('button');
+    playBtn.className = 'me-map-play-btn';
+    playBtn.textContent = '▶';
+    playBtn.title = 'Play this map';
+    playBtn.addEventListener('click', () => { _meLoadMap(map); _mePlayingMapName = map.name; _meStartPlay(); });
     const delBtn = document.createElement('button');
     delBtn.className = 'me-map-del-btn';
     delBtn.textContent = '✕';
     delBtn.title = 'Delete map (click twice)';
     delBtn.addEventListener('click', (e) => _meArmConfirm(e.currentTarget, () => _meDeleteMap(map.name)));
-    row.appendChild(loadBtn); row.appendChild(delBtn);
+    row.appendChild(loadBtn); row.appendChild(playBtn); row.appendChild(delBtn);
     _meMapList.appendChild(row);
   }
 }
@@ -14531,6 +14548,7 @@ function _meSetTool(tool) {
 
 function enterMapEditorMode() {
   if (studioMode) exitStudio();
+  _mePlayingMapName = null; // back in the editor — not in a custom-map play session
   mapEditorMode = true;
   _meUndoStack.length = 0; // fresh undo/redo stacks each session
   _meRedoStack.length = 0;
@@ -14648,7 +14666,9 @@ document.getElementById('me-exit-btn').addEventListener('click', () => exitMapEd
 // Test-play: drop the player into the current map at wave 1 with starter gold.
 // We don't run a full level — this is a sandbox test of the layout. Player can
 // return to the editor via the ESC menu.
-document.getElementById('me-play-btn')?.addEventListener('click', () => {
+// Launch test-play on whatever map is currently in the editor. Shared by the
+// panel "Test Play" button and the per-saved-map ▶ quick-play button.
+function _meStartPlay() {
   // Pre-flight path check BEFORE leaving the editor so the author sees problems
   const v = _meValidatePaths();
   exitMapEditorMode();
@@ -14663,14 +14683,21 @@ document.getElementById('me-play-btn')?.addEventListener('click', () => {
   // Floating "Back to Editor" button — the return path used to be buried in the ESC menu
   const retBtn = document.getElementById('me-return-btn');
   if (retBtn) retBtn.style.display = 'block';
+  const bestNote = _mePlayingMapName
+    ? (() => { const m = _meSavedMaps.find(x => x.name === _mePlayingMapName); return m?.bestWave ? `  ·  best: wave ${m.bestWave}` : ''; })()
+    : '';
   if (!v.any) {
-    showTooltip('Test Play — no custom paths drawn, using the default roads • press Start', 4000);
+    showTooltip(`Test Play — no custom paths drawn, using the default roads • press Start${bestNote}`, 4000);
   } else if (v.warnings.length) {
     const shown = v.warnings.slice(0, 2).join(' · ');
     showTooltip(`⚠ ${shown}${v.warnings.length > 2 ? ` (+${v.warnings.length - 2} more)` : ''} — starting anyway`, 5000);
   } else {
-    showTooltip('Test Play — your custom map • press Start to launch wave 1', 3500);
+    showTooltip(`Test Play — ${_mePlayingMapName ? `"${_mePlayingMapName}"` : 'your custom map'} • press Start to launch wave 1${bestNote}`, 3500);
   }
+}
+document.getElementById('me-play-btn')?.addEventListener('click', () => {
+  _mePlayingMapName = null; // panel Test Play = the working map, not a named save
+  _meStartPlay();
 });
 
 // Return from test play straight back into the editor (map state survives the trip)
