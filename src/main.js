@@ -4800,7 +4800,6 @@ function returnToPath(o) {
   o.pathIndex = bestIdx;
   o.progress  = 0;
   o.chasingDefender = null; // clear stale chase so enemy doesn't resume old pursuit
-  o._lungeBase = null;
   o.group.rotation.x = 0;
   o.group.rotation.y = 0;
   o.group.rotation.z = 0;
@@ -6024,6 +6023,44 @@ function tickRangedEnemy(o, dt) {
   }
 }
 
+// ── Melee lunge offset ───────────────────────────────────────────────────────
+// Attack animations nudge an enemy a little way toward whatever it is hitting.
+// That nudge used to be baked into `group.position` as an ABSOLUTE write
+// (`position = _lungeBase + dir * amount`), with `_lungeBase` captured once when a
+// swing started and cleared only when the swing finished. `swingPhase` is advanced
+// *only* inside the stand-still-and-attack branch, so an enemy whose target stepped
+// away froze mid-swing, kept its stale `_lungeBase`, and then moved under the
+// slot-navigation / chase / path branches. The first frame it was back inside its
+// attack slot, the absolute write teleported it all the way back to where the swing
+// had begun (measured up to 4.5 tiles); it then walked out and snapped back again,
+// over and over. That sawtooth is the abrupt forward/backward enemy movement
+// players reported. On a smaller scale the same write let the 0.2-tile lunge push
+// the unit outside the 0.15-tile attack-slot tolerance, so slot navigation dragged
+// it back every other frame — a constant shimmy — and it also undid the
+// `pushFromBuildings` correction that runs right after it.
+//
+// The animation is now a pure per-frame render offset: `lungeReset` removes it at
+// the top of every simulation step and the attack branch re-applies it at the end.
+// It can therefore never be baked into the simulated position, never survive as a
+// stale anchor, and never fight another controller for the same value.
+function lungeReset(o) {
+  const l = o._lungeOff;
+  if (!l) return;
+  o.group.position.x -= l.x;
+  o.group.position.z -= l.z;
+  o._lungeOff = null;
+}
+function applyLunge(o, target, amount) {
+  if (!target || !amount) return;
+  const tp = target.group.position;
+  const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
+  const d  = Math.sqrt(dx * dx + dz * dz) || 1;
+  const ox = (dx / d) * amount, oz = (dz / d) * amount;
+  o.group.position.x += ox;
+  o.group.position.z += oz;
+  o._lungeOff = { x: ox, z: oz };
+}
+
 // ─────────────────────────────────────────────
 //  UPDATE ORCS
 // ─────────────────────────────────────────────
@@ -6054,6 +6091,11 @@ function updateOrcs(dt, t) {
       }
       continue;
     }
+
+    // Strip last step's attack-animation offset before any logic reads or writes the
+    // position, so the simulation always works on the unit's true stance (see
+    // lungeReset above). Dying enemies keep theirs — they topple mid-swing.
+    lungeReset(o);
 
     // ── Attacking castle (spread across gate, same logic as wall spread) ──
     if (o.attackingCastle) {
@@ -6326,18 +6368,7 @@ function updateOrcs(dt, t) {
               if (o.legR) o.legR.rotation.x = -bs * 0.30;
             }
             // Lunge forward into the wall during the strike
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = bs * 0.20;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, bs * 0.20);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -6364,7 +6395,6 @@ function updateOrcs(dt, t) {
               if (o.legL) o.legL.rotation.x = 0;
               if (o.legR) o.legR.rotation.x = 0;
             }
-            o._lungeBase = null;
             o._swingRest = (o._swingRest || 0) + dt;
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
           }
@@ -6383,18 +6413,7 @@ function updateOrcs(dt, t) {
             if (bHead) { bHead.position.z = sb * 0.30; bHead.position.y = 1.07 - sb * 0.05; bHead.rotation.x = sb * 0.45; }
             if (bJaw)  { bJaw.rotation.x = 0.12 + sb * 0.65; } // jaw snaps wide open
             o.group.rotation.x = sb * 0.38; // whole body surges forward
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sb * 0.22;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sb * 0.22);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -6404,7 +6423,7 @@ function updateOrcs(dt, t) {
           } else {
             if (bHead) { bHead.position.z = 0; bHead.position.y = 1.07; bHead.rotation.x = 0; }
             if (bJaw)  { bJaw.rotation.x = 0.12; }
-            o.group.rotation.x = 0; o._lungeBase = null;
+            o.group.rotation.x = 0;
           }
         } else if (o.type === 'grunt') {
           // ── GRUNT wall attack: body-forward smash ──
@@ -6419,18 +6438,7 @@ function updateOrcs(dt, t) {
             if (o.armR) { o.armR.rotation.x = -1.6 + sw * 3.2; o.armR.rotation.z = -0.15 + sw * 0.20; }
             if (o.armL) { o.armL.rotation.x = -0.20 - sw * 0.3; o.armL.rotation.z = 0.28; }
             o.group.rotation.x = sw * 0.36;
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sw * 0.18;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sw * 0.18);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -6443,7 +6451,7 @@ function updateOrcs(dt, t) {
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
             if (o.armR) { o.armR.rotation.x = -1.6; o.armR.rotation.z = -0.15; }
             if (o.armL) { o.armL.rotation.x = -0.20; o.armL.rotation.z = 0.28; }
-            o.group.rotation.x = 0.08; o._lungeBase = null;
+            o.group.rotation.x = 0.08;
           }
         } else {
           // Planted stance — only weapon arm swings, no body bob or leg stride
@@ -6474,18 +6482,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -2.0 + tsw * 3.7; o.armL.rotation.z =  0.08; }
               o.group.rotation.x = tsw * 0.42;                    // body heaves forward with slam
               o.group.position.y = -tsw * 0.08;                   // knees buckle at impact
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = tsw * 0.12;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, tsw * 0.12);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -6499,7 +6496,6 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -2.0; o.armL.rotation.z =  0.08; }
               o.group.rotation.x = 0;          // clear forward heave residual
               o.group.position.y = 0;          // settle from knee buckle
-              o._lungeBase = null;
             }
           } else if (o.type === 'boss') {
             // ── BOSS: dominant overhead chop with torso rotation into the strike
@@ -6512,18 +6508,7 @@ function updateOrcs(dt, t) {
               o.group.rotation.z = 0;                              // no sideways tilt — boss is square to wall
               // Torso winds back then into strike (line 5045 above resets rotation.y to face wall each frame)
               o.group.rotation.y += (bsw - 0.5) * 0.10;
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = bsw * 0.18;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, bsw * 0.18);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -6535,7 +6520,6 @@ function updateOrcs(dt, t) {
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (o.armR) { o.armR.rotation.x = -1.7; o.armR.rotation.z = -0.28; }
               if (o.armL) { o.armL.rotation.x =  0.35; o.armL.rotation.z =  0.18; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'brute') {
             // ── BRUTE: hook swing — shoulder drives into the wall, club arcs sideways
@@ -6546,18 +6530,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x =  0.30 - bsw * 0.30; o.armL.rotation.z =  0.28; }
               o.group.rotation.x = bsw * 0.24;
               o.group.rotation.z = -bsw * 0.08;                   // gentle shoulder lead, not heavy roll
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = bsw * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, bsw * 0.22);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -6569,7 +6542,6 @@ function updateOrcs(dt, t) {
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (o.armR) { o.armR.rotation.x = -0.6; o.armR.rotation.z = -0.45; }
               if (o.armL) { o.armL.rotation.x =  0.30; o.armL.rotation.z =  0.28; }
-              o._lungeBase = null;
             }
           } else if ((o.swingPhase || 0) > 0) {
             o.swingPhase = Math.max(0, o.swingPhase - dt * 1);
@@ -6583,25 +6555,13 @@ function updateOrcs(dt, t) {
               dealDefenderDamage(o.blockedByWall, CFG.ORC_TYPES[o.type].wallDmg || 1);
               if (o.blockedByWall) spawnHitParticles(posAbove(o.blockedByWall.group.position, 1.2), 0xaaaaaa);
             }
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sw2 * 0.14;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sw2 * 0.14);
           } else {
             o._swingRest = (o._swingRest || 0) + dt;
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
             if (o.armR) { o.armR.rotation.x = -1.4; o.armR.rotation.z = -0.20; }
             if (o.armL) { o.armL.rotation.x =  0.35; o.armL.rotation.z =  0.18; }
             o.group.rotation.x = 0;
-            o._lungeBase = null;
           }
         }
         // Navigate to pre-assigned spread position across the wall face
@@ -6721,21 +6681,10 @@ function updateOrcs(dt, t) {
                 if (o.fightingDefender?.alive) { const cp = o.group.position.clone().lerp(o.fightingDefender.group.position, 0.5); cp.y += 0.6; spawnHitParticles(cp, 0xff6600); spawnImpactRing(cp, 0xff8844); }
               }
               o.group.rotation.x = -0.14 + ss * 0.44;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * ss * 0.18;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * ss * 0.18;
-              }
+              applyLunge(o, o.fightingDefender, ss * 0.18);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'wolf') {
             // Low combat crouch — slow aggressive bob + bite lunge
@@ -6756,21 +6705,10 @@ function updateOrcs(dt, t) {
                 if (o.fightingDefender?.alive) { const cp = o.group.position.clone().lerp(o.fightingDefender.group.position, 0.5); cp.y += 0.7; spawnHitParticles(cp, 0xff6600); spawnImpactRing(cp, 0xff8844); }
               }
               o.group.rotation.x = -0.10 + ws * 0.52;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * ws * 0.22;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * ws * 0.22;
-              }
+              applyLunge(o, o.fightingDefender, ws * 0.22);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'cyclops') {
             const cca = Math.sin(o.animTime);
@@ -6817,24 +6755,13 @@ function updateOrcs(dt, t) {
               if (bHead) { bHead.position.z = sb * 0.30; bHead.position.y = 1.07 - sb * 0.05; bHead.rotation.x = sb * 0.45; }
               if (bJaw)  { bJaw.rotation.x = 0.12 + sb * 0.65; }
               o.group.rotation.x = sb * 0.38;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sb * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sb * 0.22);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (bHead) { bHead.position.z = 0; bHead.position.y = 1.07; bHead.rotation.x = 0; }
               if (bJaw)  { bJaw.rotation.x = 0.12; }
-              o.group.rotation.x = 0; o._lungeBase = null;
+              o.group.rotation.x = 0;
             }
           } else if (o.type === 'brute') {
             // ── BRUTE: club-hook swing — shoulder drives forward, club arcs in sideways ──
@@ -6846,18 +6773,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = 0.30 - sw * 0.35; o.armL.rotation.z = 0.28; }
               o.group.rotation.x = sw * 0.26;
               o.group.rotation.z = -sw * 0.09;                 // gentle shoulder lead, not an off-axis roll
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.22);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.fightingDefender?.alive && weaponInRange(o, o.fightingDefender, 0.75)) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.sword(); dealDefenderDamage(o.fightingDefender, CFG.ORC_TYPES[o.type].defDmg || 1, o);
@@ -6869,7 +6785,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -0.6; o.armR.rotation.z = -0.45; }
               if (o.armL) { o.armL.rotation.x = 0.30; o.armL.rotation.z = 0.28; }
               o.group.rotation.x = 0; o.group.rotation.z = 0;
-              o._lungeBase = null;
             }
           } else if (o.type === 'grunt') {
             // ── GRUNT: aggressive shoulder-charge lunge ──
@@ -6881,18 +6796,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -0.20 - sw * 0.4; o.armL.rotation.z = 0.30; }
               o.group.rotation.x = 0.10 + sw * 0.38;
               o.group.rotation.z = sw * 0.06;                  // subtle hip lead, no big sideways tilt
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.20;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.20);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.fightingDefender?.alive && weaponInRange(o, o.fightingDefender, 0.65)) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.sword();
@@ -6907,7 +6811,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.6; o.armR.rotation.z = -0.15; }
               if (o.armL) { o.armL.rotation.x = -0.20; o.armL.rotation.z = 0.30; }
               o.group.rotation.x = 0.08; o.group.rotation.z = 0;
-              o._lungeBase = null;
             }
           } else {
             // Planted stance — feet still, body upright, only weapon arm swings
@@ -6934,7 +6837,6 @@ function updateOrcs(dt, t) {
               } else {
                 o._swingRest = (o._swingRest || 0) + dt;
                 if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-                o._lungeBase = null;
               }
             } else if ((o.swingPhase || 0) > 0) {
               // Speed proportional to defRate so fast attackers (grunt 0.9/s) swing quickly
@@ -6957,18 +6859,7 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.4 + sw * 2.8; o.armR.rotation.z = -0.20 + sw * 0.30; }
               if (o.armL) { o.armL.rotation.x =  0.40 - sw * 0.4; o.armL.rotation.z = 0.22; }
               o.group.rotation.x = sw * 0.28;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.16;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.16);
             } else {
               // Hold weapon-raised pose between swings; only restart animation once defAttackTimer
               // is about to fire so we don't spin through empty swings between damage ticks.
@@ -6978,7 +6869,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.4; o.armR.rotation.z = -0.20; }
               if (o.armL) { o.armL.rotation.x =  0.40; o.armL.rotation.z =  0.22; }
               o.group.rotation.x = 0;
-              o._lungeBase = null;
             }
           }
           pushFromBuildings(o.group.position, 0.28 + 0.12 * o.scale, o.fightingDefender);
@@ -7157,75 +7047,113 @@ function updateOrcs(dt, t) {
     // ── Skeleton wall-phase slowdown ──
     if (o._phaseTimer > 0) { o._phaseTimer -= dt; speedFactor *= 0.35; }
 
-    // ── Movement along path ──
-    o.progress += speedFactor * o.speed * dt;
-    while (o.progress >= 1) {
-      const nextIdx = o.pathIndex + 1;
-      if (nextIdx >= o.path.length) {
-        o.attackingCastle = true;
-        o.castleAttackTimer = 0;
-        o.progress = 0;
-        // Assign lateral spread slot — same pattern as wall spread
-        const takenCS = new Set();
-        for (const other of orcs) {
-          if (other !== o && other.alive && other.attackingCastle && other.castleSlotIdx >= 0)
-            takenCS.add(other.castleSlotIdx);
+    // ── Rejoin the lane on foot instead of teleporting ──
+    // pathIndex/progress describe where the enemy left the lane; its world position
+    // does not. Anything that took it off the lane (chasing a tower, fanning out
+    // across a wall face, being shoved by the crossing-push) therefore used to be
+    // undone in a single frame by the hard `position = interpolate(path)` assignment
+    // below — a snap of up to ~5 tiles backwards. It would then walk off again and
+    // snap back again, which is the abrupt forward/backward motion players reported.
+    // Walk back at the unit's own speed and hold forward progress until it is on the
+    // lane, so nothing teleports and no unit moves faster than its own stat.
+    let _rejoining = false;
+    {
+      const rc = o.path[o.pathIndex];
+      const rn = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
+      const rx = rc[0] + (rn[0] - rc[0]) * o.progress;
+      const rz = rc[1] + (rn[1] - rc[1]) * o.progress;
+      const rdx = rx - o.group.position.x, rdz = rz - o.group.position.z;
+      const rd  = Math.sqrt(rdx * rdx + rdz * rdz);
+      // Only engages when genuinely off-lane: normal path walking keeps rd at ~0.
+      if (rd > Math.max(speedFactor * o.speed * dt, 0.05)) {
+        o._rejoinT = (o._rejoinT || 0) + dt;
+        // Safety valve: if anything ever stopped an enemy converging it would stall
+        // the wave, so fall back to the old snap after a couple of seconds.
+        if (o._rejoinT < 2.5) {
+          _rejoining = true;
+          const rstep = Math.min(o.speed * dt, rd);
+          o.group.position.x += (rdx / rd) * rstep;
+          o.group.position.z += (rdz / rd) * rstep;
+          o.group.rotation.y = Math.atan2(rdx, rdz);
+          o.group.rotation.x = 0;
+          o.group.rotation.z = 0;
         }
-        let csi = 0; while (takenCS.has(csi)) csi++;
-        o.castleSlotIdx = csi;
-        const cgate = o.path[o.path.length - 1];
-        const latSign = csi === 0 ? 0 : (csi % 2 === 1 ? 1 : -1);
-        const latMag  = Math.ceil(csi / 2) * 0.85;
-        o.castleTargetZ = cgate[1] + latSign * latMag;
-        break;
+      } else {
+        o._rejoinT = 0;
       }
-      // Check if next tile has a blocking wall
-      const [nc, nr] = o.path[nextIdx];
-      const wall = getWallAtPath(nc, nr);
-      if (wall) {
-        if (o.type === 'skeleton') {
-          // Skeletons phase through walls — they're just bones, they squeeze through the gaps
-          // Slowed to 35% speed for 1.8 s while passing through
-          o._phaseTimer = 1.8;
-          spawnHitParticles(posAbove(o.group.position, 0.6), 0x88aaff);
-          SND.skeletonPhase();
-          // Do NOT break — let normal advance happen below
-        } else {
-          o.blockedByWall = wall;
-          o.wallAttackTimer = 0;
-          // Stop far enough that the enemy's scaled body doesn't penetrate the wall mesh (±0.45 half-extent)
-          o.progress = Math.max(0.05, 1 - 0.48 - 0.22 * o.scale);
-          // Assign a unique lateral spread slot so enemies fan across the wall face
-          const takenWS = new Set();
+    }
+
+    // ── Movement along path ──
+    if (!_rejoining) {
+      o.progress += speedFactor * o.speed * dt;
+      while (o.progress >= 1) {
+        const nextIdx = o.pathIndex + 1;
+        if (nextIdx >= o.path.length) {
+          o.attackingCastle = true;
+          o.castleAttackTimer = 0;
+          o.progress = 0;
+          // Assign lateral spread slot — same pattern as wall spread
+          const takenCS = new Set();
           for (const other of orcs) {
-            if (other !== o && other.alive && other.blockedByWall === wall && other.wallSlotIdx >= 0)
-              takenWS.add(other.wallSlotIdx);
+            if (other !== o && other.alive && other.attackingCastle && other.castleSlotIdx >= 0)
+              takenCS.add(other.castleSlotIdx);
           }
-          let wsi = 0; while (takenWS.has(wsi)) wsi++;
-          o.wallSlotIdx = wsi;
-          // Perpendicular direction to path at this tile
-          const [cc, cr] = o.path[o.pathIndex];
-          const perpX = -(nr - cr), perpZ = nc - cc;
-          const latSign = wsi === 0 ? 0 : (wsi % 2 === 1 ? 1 : -1);
-          const latMag  = Math.ceil(wsi / 2) * 0.85;
-          o.wallTargetX = cc + (nc - cc) * o.progress + perpX * latSign * latMag;
-          o.wallTargetZ = cr + (nr - cr) * o.progress + perpZ * latSign * latMag;
+          let csi = 0; while (takenCS.has(csi)) csi++;
+          o.castleSlotIdx = csi;
+          const cgate = o.path[o.path.length - 1];
+          const latSign = csi === 0 ? 0 : (csi % 2 === 1 ? 1 : -1);
+          const latMag  = Math.ceil(csi / 2) * 0.85;
+          o.castleTargetZ = cgate[1] + latSign * latMag;
           break;
         }
+        // Check if next tile has a blocking wall
+        const [nc, nr] = o.path[nextIdx];
+        const wall = getWallAtPath(nc, nr);
+        if (wall) {
+          if (o.type === 'skeleton') {
+            // Skeletons phase through walls — they're just bones, they squeeze through the gaps
+            // Slowed to 35% speed for 1.8 s while passing through
+            o._phaseTimer = 1.8;
+            spawnHitParticles(posAbove(o.group.position, 0.6), 0x88aaff);
+            SND.skeletonPhase();
+            // Do NOT break — let normal advance happen below
+          } else {
+            o.blockedByWall = wall;
+            o.wallAttackTimer = 0;
+            // Stop far enough that the enemy's scaled body doesn't penetrate the wall mesh (±0.45 half-extent)
+            o.progress = Math.max(0.05, 1 - 0.48 - 0.22 * o.scale);
+            // Assign a unique lateral spread slot so enemies fan across the wall face
+            const takenWS = new Set();
+            for (const other of orcs) {
+              if (other !== o && other.alive && other.blockedByWall === wall && other.wallSlotIdx >= 0)
+                takenWS.add(other.wallSlotIdx);
+            }
+            let wsi = 0; while (takenWS.has(wsi)) wsi++;
+            o.wallSlotIdx = wsi;
+            // Perpendicular direction to path at this tile
+            const [cc, cr] = o.path[o.pathIndex];
+            const perpX = -(nr - cr), perpZ = nc - cc;
+            const latSign = wsi === 0 ? 0 : (wsi % 2 === 1 ? 1 : -1);
+            const latMag  = Math.ceil(wsi / 2) * 0.85;
+            o.wallTargetX = cc + (nc - cc) * o.progress + perpX * latSign * latMag;
+            o.wallTargetZ = cr + (nr - cr) * o.progress + perpZ * latSign * latMag;
+            break;
+          }
+        }
+        o.progress -= 1;
+        o.pathIndex = nextIdx;
       }
-      o.progress -= 1;
-      o.pathIndex = nextIdx;
-    }
-    if (!o.alive || o.attackingCastle) continue;
+      if (!o.alive || o.attackingCastle) continue;
 
-    // ── Position interpolation ──
-    const cur = o.path[o.pathIndex];
-    const nxt = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
-    o.group.position.x = cur[0] + (nxt[0] - cur[0]) * o.progress;
-    o.group.position.z = cur[1] + (nxt[1] - cur[1]) * o.progress;
+      // ── Position interpolation ──
+      const cur = o.path[o.pathIndex];
+      const nxt = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
+      o.group.position.x = cur[0] + (nxt[0] - cur[0]) * o.progress;
+      o.group.position.z = cur[1] + (nxt[1] - cur[1]) * o.progress;
 
-    const dx = nxt[0] - cur[0], dz = nxt[1] - cur[1];
-    if (dx !== 0 || dz !== 0) o.group.rotation.y = Math.atan2(dx, dz);
+      const dx = nxt[0] - cur[0], dz = nxt[1] - cur[1];
+      if (dx !== 0 || dz !== 0) o.group.rotation.y = Math.atan2(dx, dz);
+    } // end !_rejoining
 
     // ── Soft push from enemies on other paths (prevents visual overlap at crossings) ──
     const crossMinD = 0.45 + 0.2 * o.scale;
