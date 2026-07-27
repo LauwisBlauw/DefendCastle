@@ -10314,7 +10314,15 @@ let _goldPopupLastPos = null;
 function spawnGoldPopup(amount, worldPos) {
   if (amount < 0) { _flushGoldPopup(amount, worldPos); return; }
   _goldPopupAccum += amount;
-  _goldPopupLastPos = worldPos;
+  // MUST clone. Every caller passes `posAbove(...)`, which returns a single shared
+  // module-level Vector3 (see the contract comment on posAbove): it is only safe to
+  // hold until the next posAbove call. This is the one call site that kept the
+  // reference across the 80 ms batching timeout, so by the time the batch flushed the
+  // vector held whatever the last hit-particle / damage-popup in those 5 frames had
+  // written into it — and _flushGoldPopup then projected that instead. Measured: a
+  // unit sold at tile (46,22) put its "+31" popup at screen x=236 instead of x=739,
+  // over on the far side of the map where the fighting was.
+  _goldPopupLastPos = worldPos.clone();
   if (_goldPopupTimer) return;
   _goldPopupTimer = setTimeout(() => {
     _goldPopupTimer = 0;
@@ -10325,9 +10333,11 @@ function spawnGoldPopup(amount, worldPos) {
 }
 function _flushGoldPopup(amount, worldPos) {
   if (!worldPos || amount === 0) return;
-  worldPos.project(camera);
-  const x = (worldPos.x *  0.5 + 0.5) * window.innerWidth;
-  const y = Math.max(68 + 58 + 4, (-worldPos.y * 0.5 + 0.5) * window.innerHeight);
+  // Project a copy: the negative-amount path passes posAbove's shared temp straight
+  // in, and projecting in place would leave that shared vector in NDC space.
+  const p = worldPos.clone().project(camera);
+  const x = (p.x *  0.5 + 0.5) * window.innerWidth;
+  const y = Math.max(68 + 58 + 4, (-p.y * 0.5 + 0.5) * window.innerHeight);
   const el = document.createElement('div');
   el.className = 'gold-popup';
   el.textContent = amount < 0 ? `${amount}🟡` : `+${amount}🟡`;
