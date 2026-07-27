@@ -6064,7 +6064,13 @@ function applyLunge(o, target, amount) {
 // ─────────────────────────────────────────────
 //  UPDATE ORCS
 // ─────────────────────────────────────────────
+// Simulation-step counter. The lane-rejoin block uses it to tell "I was walking the
+// lane last step" from "I was in a combat branch last step" without every branch
+// having to remember to reset the rejoin state. Incremented once per updateOrcs call
+// (i.e. once per substep), which is exactly once per orc per step.
+let _orcTickSeq = 0;
 function updateOrcs(dt, t) {
+  _orcTickSeq++;
   for (let i = orcs.length - 1; i >= 0; i--) {
     const o = orcs[i];
     if (!o.alive) {
@@ -6993,6 +6999,11 @@ function updateOrcs(dt, t) {
     const SEP_STOP = 0.5, SEP_SLOW = 1.0;
     const SEP_SLOW_SQ = SEP_SLOW * SEP_SLOW;
     let speedFactor = 1.0;
+    // Crowd-control-only multiplier: the slow/phase debuffs without the separation
+    // term below. The lane-rejoin walk-back needs this — separation ("don't walk into
+    // the unit ahead") can drive speedFactor to exactly 0, which must not freeze an
+    // enemy that is only moving sideways back onto its lane.
+    let ccFactor = 1.0;
     const _skipSep = orcs.length > 80;
     if (!_skipSep) for (const other of orcs) {
       if (other === o || !other.alive || other.path !== o.path) continue;
@@ -7015,6 +7026,7 @@ function updateOrcs(dt, t) {
     // ── CC: slow debuff (applied by mage orb hits and spike traps) ──
     if (o.slowTimer > 0) {
       speedFactor *= o.slowAmount;
+      ccFactor    *= o.slowAmount;
       o.slowTimer -= dt;
       if (o.slowTimer < 0) { o.slowTimer = 0; o.slowAmount = 1.0; }
     }
@@ -7045,7 +7057,7 @@ function updateOrcs(dt, t) {
     }
 
     // ── Skeleton wall-phase slowdown ──
-    if (o._phaseTimer > 0) { o._phaseTimer -= dt; speedFactor *= 0.35; }
+    if (o._phaseTimer > 0) { o._phaseTimer -= dt; speedFactor *= 0.35; ccFactor *= 0.35; }
 
     // ── Rejoin the lane on foot instead of teleporting ──
     // pathIndex/progress describe where the enemy left the lane; its world position
@@ -7058,6 +7070,15 @@ function updateOrcs(dt, t) {
     // lane, so nothing teleports and no unit moves faster than its own stat.
     let _rejoining = false;
     {
+      // A new off-lane episode begins on the first step after the enemy leaves a combat
+      // branch (those `continue` before this block, so the counter below goes stale).
+      // Give it a fresh safety-valve budget: `_rejoinT` used to be a lifetime counter
+      // that cleared only once the enemy was back on the lane, so an enemy that drifted
+      // off-lane, fought for a while, then needed a genuine walk-back arrived with the
+      // budget already spent and got teleported on its first frame — the exact snap this
+      // block exists to prevent (measured 2.62 s of stale budget carried into combat).
+      if (o._rejoinSeq !== _orcTickSeq - 1) { o._rejoinT = 0; o._rejoinBest = Infinity; }
+      o._rejoinSeq = _orcTickSeq;
       const rc = o.path[o.pathIndex];
       const rn = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
       const rx = rc[0] + (rn[0] - rc[0]) * o.progress;
@@ -7066,12 +7087,23 @@ function updateOrcs(dt, t) {
       const rd  = Math.sqrt(rdx * rdx + rdz * rdz);
       // Only engages when genuinely off-lane: normal path walking keeps rd at ~0.
       if (rd > Math.max(speedFactor * o.speed * dt, 0.05)) {
-        o._rejoinT = (o._rejoinT || 0) + dt;
-        // Safety valve: if anything ever stopped an enemy converging it would stall
-        // the wave, so fall back to the old snap after a couple of seconds.
+        // Safety valve: if anything ever stopped an enemy converging it would stall the
+        // wave, so fall back to the old snap after a couple of seconds. Only time spent
+        // FAILING to get closer counts — a long but healthy walk-back (a slowed enemy
+        // returning from a 6-tile chase takes well over 2.5 s) must not be punished.
+        // `_rejoinBest` only ever moves down within an episode, so an enemy that truly
+        // cannot converge still trips the valve and can never stall the wave.
+        if (rd < (o._rejoinBest ?? Infinity) - 0.05) { o._rejoinBest = rd; o._rejoinT = 0; }
+        else o._rejoinT = (o._rejoinT || 0) + dt;
         if (o._rejoinT < 2.5) {
           _rejoining = true;
-          const rstep = Math.min(o.speed * dt, rd);
+          // Honour crowd control: this used to step at the enemy's *base* speed, so a
+          // slowed (mage orb / spike trap) or wall-phasing enemy ignored the debuff
+          // entirely for as long as it was rejoining. `ccFactor` deliberately excludes
+          // the separation term of `speedFactor` — that one is "don't walk into the
+          // unit ahead", which must not apply to sideways movement back onto the lane
+          // (it can be exactly 0, which would make convergence impossible).
+          const rstep = Math.min(ccFactor * o.speed * dt, rd);
           o.group.position.x += (rdx / rd) * rstep;
           o.group.position.z += (rdz / rd) * rstep;
           o.group.rotation.y = Math.atan2(rdx, rdz);
@@ -7080,6 +7112,7 @@ function updateOrcs(dt, t) {
         }
       } else {
         o._rejoinT = 0;
+        o._rejoinBest = Infinity;
       }
     }
 
