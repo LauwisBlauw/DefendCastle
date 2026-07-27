@@ -164,7 +164,16 @@ function totalCostPaid(d) {
   const mult = isBuilding ? 2 : 1;
   if (lv === 1) return base;
   if (lv === 2) return base + base * mult;            // base + lv2 upgrade
-  return base + base * mult + base * 2 * mult;         // + lv3 upgrade
+  const lv3 = base + base * mult + base * 2 * mult;    // + lv3 upgrade
+  if (lv === 3) return lv3;
+  // + lv4 elite upgrade. Must mirror tryUpgradeDefender exactly:
+  //   cost = COSTS[type] * level * mult, then x1.5 for the level-3 -> 4 elite premium.
+  // This tier was added later and this function was not updated, so every level-4
+  // defender under-reported its investment by the whole elite price — a level-4
+  // tower reported 252 against 576 actually paid. That fed the sell/Shift+X refund,
+  // the panel's "Sell +N" label, AND resetGameField's full-value refund on layout
+  // rotation, which silently destroyed gold the player never chose to spend.
+  return lv3 + Math.round(base * 3 * mult * 1.5);
 }
 
 // Clear all defenders, enemies, and projectiles from the field and refund defender costs.
@@ -12292,6 +12301,15 @@ function _sellDefender(def, deferWallCache = false) {
   const sellPos = posAbove(def.group.position, 1.5);
   scene.remove(def.group); disposeGroup(def.group);
   defenders.splice(defenders.indexOf(def), 1);
+  // A sold unit must report itself dead. Enemies hold direct references
+  // (`o.fightingDefender`, `o.blockedByWall`) and release them only via `.alive`, so
+  // leaving this true left attackers locked onto an invisible, already-disposed unit:
+  // measured 3 grunts standing still for ~6 s chewing a sold tower's 35 HP down to 0
+  // before they moved on. dealDefenderDamage() is also `.alive`-guarded, so this stops
+  // the ghost's death branch running later and deleting the `occupied` entry of a
+  // building the player has since rebuilt on that tile, counting a defender loss
+  // against the wave's "no losses" star, and playing a death sound on bare ground.
+  def.alive = false;
   if (def.type === 'wall' && !deferWallCache) _rebuildWallCache();
   spawnGoldPopup(refund, sellPos);
   _bumpStat('unitsSold', 1);
