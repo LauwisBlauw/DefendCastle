@@ -16692,11 +16692,24 @@ function _cmpOutcome(a, b) {
     _modeTransEl.classList.add('fading');
     setTimeout(() => {
       fn();
-      // Two rAF so the browser has painted the new scene before fading back in
-      requestAnimationFrame(() => requestAnimationFrame(() => {
+      let _done = false;
+      const finish = () => {
+        if (_done) return;
+        _done = true;
         _modeTransEl.classList.remove('fading');
         _modeFlashing = false;
-      }));
+      };
+      // Two rAF so the browser has painted the new scene before fading back in.
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+      // Fallback — rAF is NOT guaranteed to run here, and the `_modeFlashing` latch
+      // above silently drops every later mode switch until it clears. fn() may be
+      // enterTestMode(), which deliberately cancels the rAF game loop and drives the
+      // game from a MessageChannel instead so it keeps ticking in a background tab;
+      // a hidden/throttled tab also suspends rAF. With nothing else requesting frames
+      // the latch stuck, and the next "Return to Game" / ESC-menu mode switch did
+      // nothing at all — the player had to press it twice. Measured still latched
+      // 1.5 s after entering the test arena.
+      setTimeout(finish, 400);
     }, 210);
   }
 
@@ -16815,6 +16828,17 @@ function _cmpOutcome(a, b) {
     controls.target.set(32, 0, 27);
     camera.position.set(32, 38, 68);
     controls.update();
+
+    // Re-arm Start. enterTestMode force-ends whatever wave was running (it clears
+    // waveActive, spawnQueue and every live orc), so checkWaveEnd — the only thing
+    // that normally re-enables this button — can never fire for that wave: it returns
+    // immediately on `if (!waveActive)`. Start was disabled by the click that launched
+    // the wave and nothing here undid it, so entering the test arena mid-wave and
+    // coming back left the run permanently unable to start another wave. Verified: 0
+    // orcs, no merchant, not game over, Start still disabled 19 s later.
+    // (_dismissAllOverlays above already closed the merchant, which is the only other
+    // legitimate reason for this button to be disabled.)
+    if (!gameOver) elBtnStart.disabled = false;
 
     showTooltip('Returned to normal game', 1500);
   }
