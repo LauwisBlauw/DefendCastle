@@ -555,6 +555,11 @@
       font-family: 'Nunito', sans-serif;
       font-weight: 900;
     }
+    #go-summary {
+      display: flex; gap: 18px; justify-content: center; flex-wrap: wrap;
+      margin: 8px 0 4px; font-size: 13px; color: #cdd9ea;
+      font-family: 'Nunito', sans-serif; font-weight: 800;
+    }
     #go-stars {
       font-size: 24px;
       letter-spacing: 0.12em;
@@ -602,7 +607,8 @@
     body:has(#level-select.visible) #btn-start,
     body:has(#level-select.visible) #btn-pause,
     body:has(#level-select.visible) #btn-speed,
-    body:has(#level-select.visible) #scroll-hint {
+    body:has(#level-select.visible) #scroll-hint,
+    body:has(#level-select.visible) #wave-preview {
       display: none !important;
     }
 
@@ -831,6 +837,19 @@
       white-space: nowrap;
     }
     .ls-node.ls-locked .ls-node-name { color: rgba(200,210,235,0.5); }
+    .ls-node-boss {
+      font-size: 10px; font-weight: 800; color: #d8a6ff;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.6); margin-top: 1px;
+      max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ls-node-waves {
+      font-size: 9px; font-weight: 700; color: rgba(200,215,240,0.55);
+      letter-spacing: 0.06em; margin-top: 1px;
+    }
+    .sa-prog {
+      margin-left: auto; font-size: 10px; font-weight: 800;
+      color: rgba(150,200,255,0.75); white-space: nowrap;
+    }
     .ls-node-best {
       display: block;
       margin-top: 1px;
@@ -1387,6 +1406,13 @@
     }
     #btn-retry:active { transform: translateY(1px) scale(0.97); }
 
+    #vignette {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 4; /* above the 3D canvas, below every UI layer (studio canvas sits at 500) */
+      background: radial-gradient(ellipse 85% 75% at 50% 45%, transparent 58%, rgba(2,2,12,0.34) 100%);
+    }
+
     #scroll-hint {
       position: fixed;
       top: 74px; right: 14px;
@@ -1397,6 +1423,56 @@
       z-index: 50;
       font-family: 'Nunito', sans-serif;
     }
+    /* ── NEXT-WAVE PREVIEW ──
+       Small card under the HUD, top-right. Visible only between waves so it
+       never competes with combat for attention. */
+    #wave-preview {
+      position: fixed;
+      top: 92px; right: 14px;
+      max-width: 300px;
+      background: rgba(8, 14, 28, 0.92);
+      border: 1px solid rgba(255, 180, 60, 0.4);
+      border-radius: 10px;
+      padding: 9px 12px 10px;
+      color: #ffeedd;
+      font-family: 'Nunito', sans-serif;
+      font-size: 12px;
+      z-index: 60;
+      pointer-events: none;
+      box-shadow: 0 5px 22px rgba(0,0,0,0.55);
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    #wave-preview.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    #wave-preview .wp-title {
+      font-family: 'Fredoka One', sans-serif;
+      font-size: 13px;
+      color: #ffcc66;
+      margin-bottom: 6px;
+      letter-spacing: 0.02em;
+    }
+    #wave-preview .wp-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+    #wave-preview .wp-chip {
+      display: inline-flex; align-items: center; gap: 2px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 7px;
+      padding: 2px 6px;
+      font-size: 12px;
+      cursor: default;
+    }
+    #wave-preview .wp-chip b { font-size: 11px; color: #ffd9a0; font-weight: 800; }
+    #wave-preview .wp-tags { margin-top: 7px; display: flex; flex-direction: column; gap: 4px; }
+    #wave-preview .wp-tag {
+      font-size: 11px; font-weight: 800;
+      border-radius: 6px; padding: 2px 7px;
+      width: fit-content;
+    }
+    #wave-preview .wp-siege { background: rgba(255,80,40,0.18); border: 1px solid rgba(255,110,60,0.5); color: #ffb09a; }
+    #wave-preview .wp-boss  { background: rgba(170,40,255,0.16); border: 1px solid rgba(190,90,255,0.5); color: #dcb2ff; }
+    #wave-preview .wp-mod   { background: rgba(60,190,255,0.14); border: 1px solid rgba(90,200,255,0.5); color: #a8e2ff; }
+
     /* ── DEFENDER PANEL ── */
     #defender-panel {
       position: fixed;
@@ -1663,6 +1739,22 @@
       background: linear-gradient(135deg,#7799ff,#4455dd);
       border: 2px solid rgba(160,190,255,0.75); cursor: pointer;
     }
+    .esc-mute-btn {
+      background: rgba(60,80,200,0.18);
+      border: 1px solid rgba(120,150,255,0.35);
+      border-radius: 7px;
+      width: 30px; height: 26px; flex-shrink: 0;
+      font-size: 13px; line-height: 1;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+    .esc-mute-btn:hover { background: rgba(90,110,255,0.30); transform: scale(1.08); }
+    .esc-mute-btn.muted { background: rgba(200,40,40,0.22); border-color: rgba(255,90,90,0.5); }
+    .esc-hint {
+      font-family: 'Nunito', sans-serif; font-size: 11px;
+      color: rgba(180,200,255,0.45); padding-top: 3px;
+    }
+    .esc-hint b { color: rgba(210,225,255,0.8); }
 
 
     /* keep the old IDs — panels still need them for active state */
@@ -2084,6 +2176,15 @@
     #me-path-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-bottom: 4px; }
     #me-tree-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-bottom: 4px; }
     #me-obj-grid  { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin-bottom: 4px; }
+    #me-custom-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 5px; margin-bottom: 4px; }
+    #me-custom-grid .me-tool-btn { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #studio-hotkey-legend {
+      margin-top: 8px; padding: 6px 8px;
+      font-size: 10px; line-height: 1.5; color: rgba(120,200,190,0.7);
+      background: rgba(0,40,36,0.35); border: 1px solid rgba(0,190,170,0.2);
+      border-radius: 7px; font-family: 'Nunito', sans-serif;
+    }
+    #studio-hotkey-legend b { color: #55eedd; }
     #me-prop-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; margin-bottom: 4px; }
     #me-biome-grid {
       display: grid; grid-template-columns: repeat(2,1fr); gap: 4px; margin-bottom: 10px;
@@ -2104,11 +2205,72 @@
       margin-bottom: 6px; outline: none;
     }
     #me-name-input:focus { border-color: rgba(0,220,255,0.7); }
-    #me-save-btn, #me-clear-btn, #me-play-btn, #me-undo-btn {
+    #me-save-btn, #me-clear-btn, #me-play-btn, #me-undo-btn, #me-redo-btn {
       width: 100%; padding: 7px; margin-bottom: 6px;
       border-radius: 8px; font-size: 12px; font-weight: 900;
       cursor: pointer; font-family: 'Nunito', sans-serif; transition: all 0.12s;
     }
+    #me-redo-btn {
+      background: rgba(60,60,90,0.45); border: 2px solid rgba(140,140,200,0.4); color: #c8c8ff;
+    }
+    #me-redo-btn:hover { background: rgba(80,80,130,0.6); border-color: rgba(180,180,255,0.7); color: #fff; }
+    #me-redo-btn:active { transform: translateY(1px); }
+    /* Armed state for two-click destructive buttons */
+    .me-armed, .me-armed:hover {
+      background: rgba(200,40,20,0.7) !important; border-color: rgba(255,120,80,0.9) !important;
+      color: #fff !important;
+    }
+    #me-brush-grid { display: flex; gap: 4px; }
+    .me-brush-btn {
+      flex: 1; padding: 5px 0; font-size: 11px; font-weight: 900;
+      background: rgba(20,40,70,0.5); border: 2px solid rgba(0,150,200,0.3);
+      border-radius: 7px; color: #7ab8d8; cursor: pointer;
+      font-family: 'Nunito', sans-serif; transition: all 0.12s;
+    }
+    .me-brush-btn:hover { background: rgba(0,80,130,0.55); color: #fff; }
+    .me-brush-btn.active { background: rgba(0,110,170,0.65); border-color: rgba(0,220,255,0.85); color: #fff; }
+    #me-hotkey-legend {
+      margin: 8px 0 6px; padding: 6px 8px;
+      font-size: 10px; line-height: 1.5; color: rgba(140,190,220,0.75);
+      background: rgba(0,30,50,0.35); border: 1px solid rgba(0,150,200,0.2);
+      border-radius: 7px; font-family: 'Nunito', sans-serif;
+    }
+    #me-hotkey-legend b { color: #77ddff; }
+    #me-return-btn {
+      position: fixed; top: 74px; left: 14px; z-index: 900;
+      padding: 9px 16px; border-radius: 10px;
+      font-size: 13px; font-weight: 900; font-family: 'Nunito', sans-serif;
+      background: rgba(10,40,70,0.92); border: 2px solid rgba(0,190,255,0.6);
+      color: #aee6ff; cursor: pointer; transition: all 0.12s;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    #me-return-btn:hover { background: rgba(0,90,150,0.95); color: #fff; }
+    /* First-session onboarding card */
+    #onboard-card {
+      position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+      z-index: 1400; width: min(560px, 92vw);
+      background: linear-gradient(160deg, rgba(14,26,48,0.97), rgba(8,16,32,0.97));
+      border: 2px solid rgba(90,170,255,0.55); border-radius: 16px;
+      box-shadow: 0 12px 44px rgba(0,0,0,0.6); padding: 18px 20px 16px;
+      font-family: 'Nunito', sans-serif; color: #dcebff;
+      animation: ob-pop 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    }
+    @keyframes ob-pop { from { opacity:0; transform: translateX(-50%) translateY(14px) scale(0.96); } to { opacity:1; transform: translateX(-50%) translateY(0) scale(1); } }
+    #onboard-card .ob-title {
+      font-family: 'Fredoka One', sans-serif; font-size: 20px; color: #ffd86a;
+      text-align: center; margin-bottom: 12px; letter-spacing: 0.02em;
+    }
+    #onboard-card .ob-tips { display: flex; flex-direction: column; gap: 9px; margin-bottom: 14px; }
+    #onboard-card .ob-tip { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.45; }
+    #onboard-card .ob-ico { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
+    #onboard-card .ob-tip b { color: #9fd0ff; }
+    #onboard-dismiss {
+      display: block; width: 100%; padding: 10px; border-radius: 10px; cursor: pointer;
+      font-family: 'Fredoka One', sans-serif; font-size: 15px; color: #08210a;
+      background: linear-gradient(135deg, #7be07b, #34c455);
+      border: 2px solid rgba(120,255,150,0.6); transition: all 0.14s;
+    }
+    #onboard-dismiss:hover { filter: brightness(1.1); transform: translateY(-1px); }
     #me-play-btn {
       background: rgba(0,140,40,0.5); border: 2px solid rgba(40,220,80,0.55); color: #aaffaa;
       box-shadow: 0 0 12px rgba(40,200,80,0.3);
@@ -2141,6 +2303,12 @@
     }
     .me-map-load-btn:hover { background: rgba(0,80,130,0.6); color: #fff; }
     .me-map-load-btn.active { background: rgba(0,110,170,0.6); border-color: rgba(0,220,255,0.8); color: #fff; }
+    .me-map-play-btn {
+      padding: 4px 7px; font-size: 11px; background: rgba(0,120,40,0.4);
+      border: 2px solid rgba(40,200,90,0.4); border-radius: 6px; color: #8fffa8;
+      cursor: pointer; font-family: 'Nunito', sans-serif; transition: all 0.12s;
+    }
+    .me-map-play-btn:hover { background: rgba(0,170,60,0.65); color: #fff; }
     .me-map-del-btn {
       padding: 4px 6px; font-size: 11px; background: rgba(100,20,0,0.4);
       border: 2px solid rgba(200,80,40,0.35); border-radius: 6px; color: #ff9977;
@@ -2535,7 +2703,13 @@
     <button id="btn-start">▶ Start Wave</button>
   </div>
 
+  <!-- Subtle vignette over the 3D view (under all UI) — zero render cost -->
+  <div id="vignette" aria-hidden="true"></div>
+
   <div id="scroll-hint">Scroll · Drag to orbit</div>
+
+  <!-- NEXT-WAVE PREVIEW — populated by updateWavePreview() between waves -->
+  <div id="wave-preview" aria-live="polite"></div>
 
   <!-- ESC MENU -->
   <div id="esc-menu">
@@ -2560,15 +2734,23 @@
         <hr class="esc-divider">
         <div class="esc-settings-heading">Settings</div>
         <div class="esc-slider-row">
-          <span class="esc-slider-label">🔊 SFX</span>
+          <button class="esc-mute-btn" id="sfx-mute" title="Mute / unmute sound effects" aria-label="Mute sound effects">🔊</button>
+          <span class="esc-slider-label">SFX</span>
           <input type="range" class="esc-range" id="sfx-slider" min="0" max="100" value="32">
           <span class="esc-slider-val" id="sfx-val">32</span>
         </div>
         <div class="esc-slider-row">
-          <span class="esc-slider-label">🎵 Music</span>
+          <button class="esc-mute-btn" id="music-mute" title="Mute / unmute music" aria-label="Mute music">🎵</button>
+          <span class="esc-slider-label">Music</span>
           <input type="range" class="esc-range" id="music-slider" min="0" max="100" value="0">
           <span class="esc-slider-val" id="music-val">0</span>
         </div>
+        <div class="esc-slider-row">
+          <button class="esc-mute-btn" id="bloom-toggle" title="Toggle bloom glow effects" aria-label="Toggle glow effects">✨</button>
+          <span class="esc-slider-label">Glow FX</span>
+          <span class="esc-slider-val" id="bloom-val" style="width:auto">On</span>
+        </div>
+        <div class="esc-hint">Press <b>M</b> in-game to mute / unmute everything</div>
       </div>
     </div>
   </div>
@@ -2603,8 +2785,9 @@
   <!-- GAME OVER OVERLAY -->
   <div id="game-over" role="dialog" aria-modal="true" aria-labelledby="go-title">
     <h1 id="go-title">GAME OVER</h1>
-    <p class="go-sub">Oops! Your castle fell down! 😅</p>
+    <p class="go-sub">The castle has fallen — the realm remembers its defenders.</p>
     <p class="go-stats" id="go-stats"></p>
+    <div id="go-summary"></div>
     <p id="go-highscore"></p>
     <p id="go-stars"></p>
     <div id="go-btn-row">
@@ -2790,6 +2973,10 @@
         <select id="studio-part-layer-sel"></select>
       </div>
     </div>
+    <div id="studio-hotkey-legend">
+      <b>Keys</b> — arrows move · Shift+↑↓ raise/lower · Ctrl+D dupe ·
+      Del delete · Ctrl+Z/Y undo/redo · drag orbits · wheel zooms
+    </div>
   </div>
 
   <!-- STUDIO RIGHT PANEL — layers + library -->
@@ -2920,6 +3107,9 @@
       <button class="me-tool-btn erase" data-me-tool="erase">🗑 Erase</button>
     </div>
 
+    <div class="me-section-label" style="margin-top:6px">Custom (Studio builds)</div>
+    <div id="me-custom-grid"></div>
+
     <div class="me-section-label" style="margin-top:8px">Biome / Theme</div>
     <div id="me-biome-grid"></div>
 
@@ -2927,7 +3117,17 @@
     <button id="me-play-btn">▶ Test Play</button>
 
     <div class="me-section-label" style="margin-top:8px">Edit</div>
-    <button id="me-undo-btn">↩ Undo (Ctrl+Z)</button>
+    <div style="display:flex;gap:4px">
+      <button id="me-undo-btn">↩ Undo</button>
+      <button id="me-redo-btn">↪ Redo</button>
+    </div>
+
+    <div class="me-section-label" style="margin-top:8px">Brush (tiles &amp; erase)</div>
+    <div id="me-brush-grid">
+      <button class="me-brush-btn active" data-brush="1">1×1</button>
+      <button class="me-brush-btn" data-brush="2">2×2</button>
+      <button class="me-brush-btn" data-brush="3">3×3</button>
+    </div>
 
     <div class="me-section-label" style="margin-top:8px">Save Map</div>
     <input id="me-name-input" type="text" placeholder="Map name…" maxlength="40">
@@ -2943,12 +3143,32 @@
       <label id="me-import-label">⬆ Import JSON<input id="me-import-input" type="file" accept=".json" style="display:none"></label>
     </div>
 
+    <div id="me-hotkey-legend">
+      <b>Hotkeys</b> — G grass · D dirt · S sand · W water · L lava · A/B/C paths ·
+      T tree · R rock · E erase · P test play · Ctrl+Z undo · Ctrl+Y redo ·
+      right-click / RMB-drag erases
+    </div>
+
     <button id="me-exit-btn">✕ Exit Map Editor</button>
+  </div>
+
+  <!-- Floating return button shown during map-editor Test Play -->
+  <button id="me-return-btn" style="display:none">🗺 Back to Editor</button>
+
+  <!-- First-session onboarding card (shown once, then td_onboarded is persisted) -->
+  <div id="onboard-card" style="display:none" role="dialog" aria-modal="true" aria-label="How to play">
+    <div class="ob-title">⚔️ Defend the Castle!</div>
+    <div class="ob-tips">
+      <div class="ob-tip"><span class="ob-ico">🏰</span><span><b>Build defenders</b> from the bottom panel — click a card, then a tile. Walls block roads; towers &amp; troops fight.</span></div>
+      <div class="ob-tip"><span class="ob-ico">▶️</span><span><b>Press Start</b> (or <b>Enter</b>) to send the next wave when you're ready. The card up top previews what's coming.</span></div>
+      <div class="ob-tip"><span class="ob-ico">⏩</span><span><b>Speed &amp; Pause</b> are top-right (or <b>P</b>). Select a unit to <b>upgrade</b> (U) or <b>sell</b> (X).</span></div>
+    </div>
+    <button id="onboard-dismiss">Got it — let's go!</button>
   </div>
 
   <!-- BOTTOM BUILD PANEL -->
   <div id="build-panel">
-    <div id="panel-label">Build Menu  •  <span style="opacity:0.7">Enter start wave  ·  P pause  ·  1-9·0 select  ·  drag-paint walls  ·  Q deselect  ·  right-click cancel  ·  U upgrade  ·  X sell  ·  R rally</span></div>
+    <div id="panel-label">Build Menu  •  <span style="opacity:0.7">Enter start wave  ·  P pause  ·  M mute  ·  1-9·0 select  ·  drag-paint walls  ·  Q deselect  ·  right-click cancel  ·  U upgrade  ·  X sell  ·  R rally</span></div>
     <div id="build-cards">
 
       <div class="build-card" data-tool="wall" data-hotkey="1">

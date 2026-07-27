@@ -10,6 +10,15 @@ let lastResult = null;
 const resultHistory = [];
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        // three.js is the bulk of the bundle and changes only on dependency
+        // bumps — splitting it lets browsers cache it across game updates.
+        manualChunks: { three: ['three'] },
+      },
+    },
+  },
   plugins: [
     {
       name: 'test-api',

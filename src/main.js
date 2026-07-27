@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ─────────────────────────────────────────────
 //  CONFIG
@@ -160,7 +164,16 @@ function totalCostPaid(d) {
   const mult = isBuilding ? 2 : 1;
   if (lv === 1) return base;
   if (lv === 2) return base + base * mult;            // base + lv2 upgrade
-  return base + base * mult + base * 2 * mult;         // + lv3 upgrade
+  const lv3 = base + base * mult + base * 2 * mult;    // + lv3 upgrade
+  if (lv === 3) return lv3;
+  // + lv4 elite upgrade. Must mirror tryUpgradeDefender exactly:
+  //   cost = COSTS[type] * level * mult, then x1.5 for the level-3 -> 4 elite premium.
+  // This tier was added later and this function was not updated, so every level-4
+  // defender under-reported its investment by the whole elite price — a level-4
+  // tower reported 252 against 576 actually paid. That fed the sell/Shift+X refund,
+  // the panel's "Sell +N" label, AND resetGameField's full-value refund on layout
+  // rotation, which silently destroyed gold the player never chose to spend.
+  return lv3 + Math.round(base * 3 * mult * 1.5);
 }
 
 // Clear all defenders, enemies, and projectiles from the field and refund defender costs.
@@ -487,17 +500,23 @@ const _UNIT_ORC_DEFAULTS = JSON.parse(JSON.stringify(CFG.ORC_TYPES));
 
 let mapEditorMode   = false;
 let _meActiveTool   = 'tree';
+let _meBrushSize    = 1;            // 1/2/3 — square brush for plain tile tools + erase
 let _meItems        = [];           // [{type, col, row, scale, seed, group}]
 let _meTileOverrides = {};          // key `col,row` -> { origMat, origType, newType }
 let _mePaths        = [[], [], []]; // ordered [col,row] per path A/B/C (index 0/1/2)
 let _mePathTiles    = [{}, {}, {}]; // quick lookup: key->`col,row` per path index
 let _meSavedMaps    = [];
 let _meLoadedName   = null;
+let _mePlayingMapName = null; // set when playing a specific saved map (for per-map best-wave records); cleared on mode changes
 let _meHoverMesh    = null;
-// Undo stack — each entry is a closure that reverses ONE editor action.
-// Capped at 50 to bound memory; older actions just fall off the bottom.
+// Undo/redo stacks — each entry is { undo, redo }: paired closures that reverse
+// or re-apply ONE editor action. Capped at 50 to bound memory.
 let _meUndoStack    = [];
+let _meRedoStack    = [];
 const _ME_UNDO_LIMIT = 50;
+// While true, a redo is replaying an action — _mePushUndo becomes a no-op so
+// the replay doesn't record itself as a brand-new action.
+let _meReplaying = false;
 // Batching: while a drag-stroke is in progress (between mousedown and mouseup),
 // individual tile actions accumulate into _meUndoBatch instead of pushing directly.
 // One Ctrl+Z then reverses the WHOLE stroke, which is what players expect.
@@ -509,23 +528,41 @@ function _meEndUndoBatch() {
   _meUndoBatch = null;
   if (batch.length === 0) return;
   if (batch.length === 1) { _mePushUndoRaw(batch[0]); return; }
-  // Collapse N closures into one — reverse order so the LAST action undoes first.
-  _mePushUndoRaw(() => { for (let i = batch.length - 1; i >= 0; i--) batch[i](); });
+  // Collapse N entries into one — undo runs in reverse order, redo re-applies forward.
+  _mePushUndoRaw({
+    undo: () => { for (let i = batch.length - 1; i >= 0; i--) batch[i].undo(); },
+    redo: () => { for (let i = 0; i < batch.length; i++) batch[i].redo(); },
+  });
 }
-function _mePushUndoRaw(undoFn) {
-  _meUndoStack.push(undoFn);
+function _mePushUndoRaw(entry) {
+  _meUndoStack.push(entry);
   if (_meUndoStack.length > _ME_UNDO_LIMIT) _meUndoStack.shift();
+  _meRedoStack.length = 0; // a fresh action invalidates the redo branch
 }
-function _mePushUndo(undoFn) {
+function _mePushUndo(undoFn, redoFn) {
+  if (_meReplaying) return; // redo replays must not re-record themselves
+  const entry = { undo: undoFn, redo: redoFn || (() => {}) };
   // If a batch is open, accumulate. Otherwise push directly (single-click actions).
-  if (_meUndoBatch) _meUndoBatch.push(undoFn);
-  else _mePushUndoRaw(undoFn);
+  if (_meUndoBatch) _meUndoBatch.push(entry);
+  else _mePushUndoRaw(entry);
 }
 function _meUndo() {
-  const fn = _meUndoStack.pop();
-  if (!fn) { showTooltip('Nothing to undo', 1200); return; }
-  try { fn(); } catch (err) { console.warn('undo failed:', err); }
-  showTooltip(`Undo (${_meUndoStack.length} left)`, 900);
+  const entry = _meUndoStack.pop();
+  if (!entry) { showTooltip('Nothing to undo', 1200); return; }
+  try { entry.undo(); } catch (err) { console.warn('undo failed:', err); }
+  _meRedoStack.push(entry);
+  showTooltip(`Undo (${_meUndoStack.length} left · Ctrl+Y = redo)`, 900);
+}
+function _meRedo() {
+  const entry = _meRedoStack.pop();
+  if (!entry) { showTooltip('Nothing to redo', 1200); return; }
+  _meReplaying = true;
+  try { entry.redo(); } catch (err) { console.warn('redo failed:', err); }
+  finally { _meReplaying = false; }
+  // Back onto the undo stack directly — must NOT clear the remaining redo branch
+  _meUndoStack.push(entry);
+  if (_meUndoStack.length > _ME_UNDO_LIMIT) _meUndoStack.shift();
+  showTooltip(`Redo (${_meRedoStack.length} left)`, 900);
 }
 
 // Feature 4: unlock system
@@ -569,17 +606,222 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x080c14);
 scene.fog = new THREE.Fog(0x080c14, 80, 160);
 
+// ── SKY DOME — vertical gradient (horizon → zenith), tinted per biome ──────
+// Replaces the flat scene.background with real atmospheric depth: pale at the
+// horizon (matching the fog colour so terrain fades seamlessly into sky),
+// deepening toward the zenith. Drawn first with no depth write so stars/moon
+// still render on top; ignores fog so it reads as sky beyond the falloff.
+const skyDomeMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  fog: false,
+  uniforms: {
+    topColor:     { value: new THREE.Color(0x5588bb) },
+    horizonColor: { value: new THREE.Color(0x88aacc) },
+  },
+  vertexShader: /* glsl */`
+    varying vec3 vWorld;
+    void main() {
+      vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform vec3 topColor;
+    uniform vec3 horizonColor;
+    varying vec3 vWorld;
+    void main() {
+      float h = normalize(vWorld - cameraPosition).y;
+      float t = smoothstep(-0.08, 0.5, h);
+      gl_FragColor = vec4(mix(horizonColor, topColor, t), 1.0);
+    }`,
+});
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(230, 24, 12), skyDomeMat);
+skyDome.position.set(36, 0, 27);
+skyDome.renderOrder = -10;
+scene.add(skyDome);
+
+// ── VOXEL CLOUDS — chunky flat clusters drifting over the map ──────────────
+// They cast real shadows, so cloud shade slowly sweeps across the battlefield.
+// Tint/opacity follow the biome (bright over Meadow, ash-dark over Mordor).
+// Drift uses wall-clock elapsed time: ambient motion shouldn't speed up at 2×
+// game speed, and it keeps the menu backdrop alive while paused.
+const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.92 });
+const cloudGroup = new THREE.Group();
+const _clouds = [];
+{
+  // Deterministic layout (mulberry-ish hash) so the sky looks the same every load
+  const rnd = (i, s) => { const x = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return x - Math.floor(x); };
+  for (let i = 0; i < 8; i++) {
+    const c = new THREE.Group();
+    const puffs = 3 + Math.floor(rnd(i, 1) * 3);
+    for (let p = 0; p < puffs; p++) {
+      const w = 4 + rnd(i, p + 2) * 6, d = 2.5 + rnd(i, p + 9) * 4;
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, 1.1, d), cloudMat);
+      m.position.set((p - puffs / 2) * 3 + rnd(i, p + 17) * 2, rnd(i, p + 23) * 0.8, (rnd(i, p + 31) - 0.5) * 3.5);
+      m.castShadow = true;
+      c.add(m);
+    }
+    c.position.y = 26 + rnd(i, 40) * 9;
+    c.position.z = -8 + rnd(i, 50) * 70;
+    _clouds.push({ group: c, baseX: rnd(i, 60) * 140 - 30, speed: 0.45 + rnd(i, 70) * 0.5 });
+    cloudGroup.add(c);
+  }
+}
+scene.add(cloudGroup);
+function updateClouds(elapsed) {
+  for (const c of _clouds) {
+    // Wrap across [-35, 105] so clouds re-enter long before becoming visible
+    c.group.position.x = ((c.baseX + elapsed * c.speed + 35) % 140) - 35;
+  }
+}
+// Per-biome cloud dressing — keyed by biome name, falls back to plain white
+const CLOUD_STYLE = {
+  Meadow:   { color: 0xffffff, opacity: 0.92 },
+  Desert:   { color: 0xf2dcae, opacity: 0.55 },
+  Icelands: { color: 0xe8f2ff, opacity: 0.95 },
+  Lava:     { color: 0x4a2018, opacity: 0.85 },
+  Mordor:   { color: 0x3a342c, opacity: 0.88 },
+  Doom:     { color: 0x3a1226, opacity: 0.85 },
+  Vibe:     { color: 0x7a55cc, opacity: 0.60 },
+};
+
+// ── AMBIENT PARTICLES — per-biome atmosphere motes ──────────────────────────
+// One pooled THREE.Points cloud restyled per biome: fireflies drifting low
+// over the Meadow, falling snow in the Icelands, rising embers over Lava,
+// ash flakes in Mordor, neon motes in Vibe. Driven by wall-clock time like
+// the clouds (ambience shouldn't fast-forward at 2× or freeze on pause).
+const AMBIENT_STYLE = {
+  Meadow:   { color: 0xdfff7a, size: 0.30, opacity: 0.75, add: true,  count: 90,  mode: 'firefly', yMin: 0.4, yMax: 4.5, spd: [0.4, 0.9] },
+  Desert:   { color: 0xd8b878, size: 0.50, opacity: 0.26, add: false, count: 140, mode: 'drift',   yMin: 0.5, yMax: 9,   spd: [1.2, 2.6] },
+  Icelands: { color: 0xffffff, size: 0.38, opacity: 0.90, add: false, count: 220, mode: 'fall',    yMin: 0,   yMax: 22,  spd: [1.2, 2.4] },
+  Lava:     { color: 0xff7733, size: 0.32, opacity: 0.90, add: true,  count: 160, mode: 'rise',    yMin: 0,   yMax: 14,  spd: [0.8, 1.8] },
+  Mordor:   { color: 0x77695a, size: 0.42, opacity: 0.50, add: false, count: 150, mode: 'fall',    yMin: 0,   yMax: 18,  spd: [0.5, 1.1] },
+  Doom:     { color: 0xcc2255, size: 0.28, opacity: 0.70, add: true,  count: 110, mode: 'rise',    yMin: 0,   yMax: 12,  spd: [0.5, 1.2] },
+  Vibe:     { color: 0xff55dd, size: 0.30, opacity: 0.80, add: true,  count: 120, mode: 'rise',    yMin: 0,   yMax: 14,  spd: [0.4, 1.0] },
+};
+const AMBIENT_MAX = 220;
+const _ambPos  = new Float32Array(AMBIENT_MAX * 3);
+const _ambSeed = []; // { spd, ph } per particle
+const _ambGeo  = new THREE.BufferGeometry();
+_ambGeo.setAttribute('position', new THREE.BufferAttribute(_ambPos, 3));
+const ambientPtsMat = new THREE.PointsMaterial({
+  color: 0xdfff7a, size: 0.3, transparent: true, opacity: 0.75,
+  depthWrite: false, sizeAttenuation: true,
+});
+const ambientPts = new THREE.Points(_ambGeo, ambientPtsMat);
+ambientPts.frustumCulled = false; // positions update on CPU; skip stale-bounds culling
+scene.add(ambientPts);
+let _ambStyle = AMBIENT_STYLE.Meadow;
+function _applyAmbientStyle(name) {
+  _ambStyle = AMBIENT_STYLE[name] || AMBIENT_STYLE.Meadow;
+  const s = _ambStyle;
+  ambientPtsMat.color.setHex(s.color);
+  ambientPtsMat.size = s.size;
+  ambientPtsMat.opacity = s.opacity;
+  ambientPtsMat.blending = s.add ? THREE.AdditiveBlending : THREE.NormalBlending;
+  ambientPtsMat.needsUpdate = true;
+  _ambGeo.setDrawRange(0, s.count);
+  _ambSeed.length = 0;
+  for (let i = 0; i < s.count; i++) {
+    _ambPos[i * 3]     = -2 + Math.random() * 78; // x: across the whole field
+    _ambPos[i * 3 + 1] = s.yMin + Math.random() * (s.yMax - s.yMin);
+    _ambPos[i * 3 + 2] = -2 + Math.random() * 60; // z
+    _ambSeed.push({ spd: s.spd[0] + Math.random() * (s.spd[1] - s.spd[0]), ph: Math.random() * Math.PI * 2 });
+  }
+  _ambGeo.attributes.position.needsUpdate = true;
+}
+function updateAmbientParticles(rawDt, t) {
+  const s = _ambStyle;
+  for (let i = 0; i < s.count; i++) {
+    const j = i * 3, sd = _ambSeed[i];
+    if (!sd) break;
+    if (s.mode === 'fall') {
+      _ambPos[j + 1] -= sd.spd * rawDt;
+      _ambPos[j]     += Math.sin(t * 0.5 + sd.ph) * 0.4 * rawDt;
+      if (_ambPos[j + 1] < s.yMin) _ambPos[j + 1] = s.yMax;
+    } else if (s.mode === 'rise') {
+      _ambPos[j + 1] += sd.spd * rawDt;
+      _ambPos[j]     += Math.sin(t * 0.8 + sd.ph) * 0.6 * rawDt;
+      if (_ambPos[j + 1] > s.yMax) _ambPos[j + 1] = s.yMin;
+    } else if (s.mode === 'drift') {
+      _ambPos[j]     += sd.spd * rawDt;
+      _ambPos[j + 1] += Math.sin(t * 0.6 + sd.ph) * 0.25 * rawDt;
+      if (_ambPos[j] > 78) _ambPos[j] = -4;
+    } else { // firefly: gentle 3D wander inside a low band
+      _ambPos[j]     += Math.sin(t * 0.35 + sd.ph) * sd.spd * rawDt;
+      _ambPos[j + 2] += Math.cos(t * 0.30 + sd.ph * 1.7) * sd.spd * rawDt;
+      _ambPos[j + 1] += Math.sin(t * 0.85 + sd.ph) * 0.3 * rawDt;
+      if (_ambPos[j + 1] < s.yMin) _ambPos[j + 1] = s.yMin;
+      if (_ambPos[j + 1] > s.yMax) _ambPos[j + 1] = s.yMax;
+    }
+  }
+  // Fireflies softly pulse as a swarm
+  if (s.mode === 'firefly') ambientPtsMat.opacity = s.opacity * (0.65 + 0.35 * Math.sin(t * 1.8));
+  _ambGeo.attributes.position.needsUpdate = true;
+}
+
+// ── DAY/NIGHT CYCLE — endless mode only ─────────────────────────────────────
+// A slow sinusoidal brightness sweep (4-minute day) layered multiplicatively
+// over the active biome's base lighting, so long endless runs breathe between
+// noon and deep night. Every frame recomputes from the biome table, and the
+// exact base values are restored the moment the player leaves endless.
+const DAYNIGHT_PERIOD = 240; // seconds per full day
+let _dnWasActive = false;
+function updateDayNight(t) {
+  const active = currentLevel?.id === 'endless' && activeBiomeIdx >= 0;
+  const b = BIOMES[activeBiomeIdx];
+  if (!active || !b) {
+    if (_dnWasActive && b) {
+      _dnWasActive = false;
+      sun.intensity       = b.sun[1];
+      ambient.intensity   = b.ambient[1];
+      hemiLight.intensity = b.hemi[2];
+      skyDomeMat.uniforms.topColor.value.setHex(b.bg);
+      skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]);
+      scene.fog.color.setHex(b.fog[0]);
+    }
+    return;
+  }
+  _dnWasActive = true;
+  const cyc    = 0.5 + 0.5 * Math.sin(t * Math.PI * 2 / DAYNIGHT_PERIOD); // 1 = noon, 0 = midnight
+  const lightF = 0.55 + 0.45 * cyc;   // lights never fully die — the game stays readable at night
+  const skyF   = 0.40 + 0.60 * cyc;
+  sun.intensity       = b.sun[1]     * lightF;
+  ambient.intensity   = b.ambient[1] * lightF;
+  hemiLight.intensity = b.hemi[2]    * lightF;
+  skyDomeMat.uniforms.topColor.value.setHex(b.bg).multiplyScalar(skyF);
+  skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]).multiplyScalar(skyF);
+  scene.fog.color.setHex(b.fog[0]).multiplyScalar(skyF);
+}
+
 const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ antialias: false, canvas });
+const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.BasicShadowMap;  // hard pixel-perfect block shadows
-renderer.toneMapping = THREE.NoToneMapping;       // pure colours, no filmic grading
+renderer.shadowMap.type = THREE.PCFShadowMap;     // blocky but not stair-stepped — keeps the voxel feel without shadow-edge crawl
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // filmic grading: richer saturation rolloff, highlights stop clipping
+renderer.toneMappingExposure = 1.35;                // ACES darkens midtones — compensate so the palette keeps its brightness
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 280);
 camera.position.set(32, 38, 68);
 camera.lookAt(32, 0, 27);
+
+// ── POST-PROCESSING — subtle bloom so emissives (lava, lanterns, crystals,
+// magic bolts, boss eyes) actually glow instead of just being bright pixels.
+// Toggleable in settings ("Glow FX"); when off, the classic single-pass
+// renderer.render path is used untouched.
+let bloomEnabled = true; // persisted via td_settings (see _initSettings)
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.45,  // strength — subtle halo, not a haze
+  0.55,  // radius
+  0.80,  // threshold — only genuinely bright/emissive surfaces bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass()); // applies tone mapping + sRGB in the composer path
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(32, 0, 27);
@@ -674,10 +916,55 @@ function makePxTex(baseHex, { spots = false, stripes = false, seed = 0x9a7f3c } 
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
-// Convenience: textured MeshStandardMaterial with flat shading + NearestFilter map
+// Convenience: textured MeshStandardMaterial with flat shading + NearestFilter map.
+//
+// The map is a NEUTRAL white-based grain (darkening noise only) shared per
+// pattern, while the material's `color` carries the hue. Two reasons:
+//  1. applyBiome() re-tints several of these materials at runtime via setHex —
+//     a colour baked into the texture would double-multiply and muddy the tint.
+//  2. Darkening-only noise keeps every palette hue at its designed brightness.
+const _pxTexCache = new Map();
+function _neutralPxTex({ spots = false, stripes = false } = {}) {
+  const key = `${spots ? 1 : 0}|${stripes ? 1 : 0}`;
+  if (_pxTexCache.has(key)) return _pxTexCache.get(key);
+  const SZ = 16;
+  const cv = document.createElement('canvas'); cv.width = cv.height = SZ;
+  const ctx = cv.getContext('2d');
+  let s = 0x9a7f3c;
+  const rng = () => { s = (Math.imul(s, 1664525) + 1013904223) | 0; return (s >>> 0) / 0x100000000; };
+  const val = new Float32Array(SZ * SZ).fill(255); // darkening-only weathering field
+
+  // COARSE blotches: a handful of soft dark patches several texels wide. Per-pixel
+  // noise (the old approach) averaged back to flat under mipmapping, so weathering
+  // vanished at gameplay distance — low-frequency blotches survive the mip chain.
+  const nBlobs = spots ? 7 : 5;
+  for (let i = 0; i < nBlobs; i++) {
+    const cx = rng() * SZ, cy = rng() * SZ;
+    const r  = 2.0 + rng() * 3.5;
+    const depth = (spots ? 46 : 30) * (0.6 + rng() * 0.4);
+    for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < r) val[y * SZ + x] -= depth * (1 - d / r);
+    }
+  }
+  // Pattern overlays + fine grain
+  for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+    let v = val[y * SZ + x] - rng() * 12;          // subtle per-texel break-up on top
+    if (stripes && (y % 4 < 2)) v -= 22;           // plank / brushed-metal banding
+    const c = Math.max(20, Math.min(255, v | 0));  // floor so nothing goes pure black
+    ctx.fillStyle = `rgb(${c},${c},${c})`;
+    ctx.fillRect(x, y, 1, 1);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestMipmapNearestFilter;
+  _pxTexCache.set(key, tex);
+  return tex;
+}
 function pxMat(baseHex, opts = {}, extra = {}) {
   return new THREE.MeshStandardMaterial({
     color: baseHex,
+    map: _neutralPxTex(opts),
     roughness: 0.92, metalness: 0, flatShading: true,
     ...extra,
   });
@@ -695,7 +982,7 @@ const M = {
   castleFlag:   new THREE.MeshStandardMaterial({ color: 0x1e56c8 }),  // royal-blue banner — flies on castle, tower pennant & knight tabard (was red)
   castleFlagPole: new THREE.MeshStandardMaterial({ color: 0xd4a04a }), // gold trim accent
   towerBase:    new THREE.MeshStandardMaterial({ color: 0x2c3e50 }),
-  crystal:      new THREE.MeshStandardMaterial({ color: 0x00d4ff, emissive: 0x00d4ff, emissiveIntensity: 1.2 }),
+  crystal:      new THREE.MeshStandardMaterial({ color: 0x00d4ff, emissive: 0x00d4ff, emissiveIntensity: 1.9 }),
   wallStone:    new THREE.MeshStandardMaterial({ color: 0x7a8898 }),
   catWood:      new THREE.MeshStandardMaterial({ color: 0x3a2515 }),
   catMetal:     new THREE.MeshStandardMaterial({ color: 0x4a4a5a, metalness: 0.7, roughness: 0.4 }),
@@ -710,13 +997,13 @@ const M = {
   orcHead:      pxMat('#4a1c1c'),
   // Enemy faction accent = purple (glowing eyes unify all enemies as "the purple horde";
   // each species gets a slightly different shade so individual identities still read clearly).
-  orcEye:       new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.0 }),
+  orcEye:       new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.6 }),
   orcTusk:      new THREE.MeshStandardMaterial({ color: 0xf0e0c0 }),
   bruteBody:    pxMat('#4a1208', { stripes: true }), // volcanic crimson — very distinct from teal grunt
   bruteEye:     new THREE.MeshStandardMaterial({ color: 0xdd44ff, emissive: 0xdd44ff, emissiveIntensity: 1.2 }),
   bossBody:     pxMat('#2a0820', { stripes: true }), // blackened blood-purple warlord (kept dark & corrupt, nudged warm)
   trollMat:     pxMat('#3e2c1a', { spots: true }),   // rust-brown troll (shifted off olive-green into the warm horde)
-  trollEye:     new THREE.MeshStandardMaterial({ color: 0xcc22dd, emissive: 0xcc22dd, emissiveIntensity: 0.9 }),
+  trollEye:     new THREE.MeshStandardMaterial({ color: 0xcc22dd, emissive: 0xcc22dd, emissiveIntensity: 1.6 }),
   trollClub:    new THREE.MeshStandardMaterial({ color: 0x3a2510 }),
   rockTrollMat: pxMat('#564e44', { spots: true }),   // warm stone-skin rock troll (grey nudged warm so it isn't read as steel)
   rockTrollEye: new THREE.MeshStandardMaterial({ color: 0x9922ff, emissive: 0x7711cc, emissiveIntensity: 1.4 }),
@@ -725,7 +1012,7 @@ const M = {
   // Wolf — warm charcoal (shifted off blue-grey so it can't be mistaken for a steel defender)
   wolfBody:     pxMat('#473a38', { stripes: true }),
   wolfHead:     pxMat('#372c2a'),
-  wolfEye:      new THREE.MeshStandardMaterial({ color: 0xbb33ff, emissive: 0xbb33ff, emissiveIntensity: 1.0 }),
+  wolfEye:      new THREE.MeshStandardMaterial({ color: 0xbb33ff, emissive: 0xbb33ff, emissiveIntensity: 1.6 }),
   // Spider — red-black carapace (shifted off blue-black; warm so it stays in the horde palette)
   spiderBody:   pxMat('#1c0808', { spots: true }),
   spiderEye:    new THREE.MeshStandardMaterial({ color: 0xaa33ff, emissive: 0xaa33ff, emissiveIntensity: 1.2 }),
@@ -745,7 +1032,7 @@ const M = {
   // visor rims, helm crests, sword pommels, tabard emblems). Paired with royal-blue cloth +
   // steel this gives the cohesive "Azure & Gold Order" look — warm metallic gold is unmistakable
   // against the enemy's matte blood-red bodies, so it never blurs the faction line.
-  swGold:       new THREE.MeshStandardMaterial({ color: 0xe0a82a, metalness: 0.7, roughness: 0.32, emissive: 0x3a2400, emissiveIntensity: 0.22 }),
+  swGold:       new THREE.MeshStandardMaterial({ color: 0xe0a82a, metalness: 0.7, roughness: 0.32, emissive: 0xc89020, emissiveIntensity: 0.85 }),
   spCape:       new THREE.MeshStandardMaterial({ color: 0x1a2e72 }),  // deep royal-blue cape (was crimson — now matches the Azure Order)
   spHelmet:     new THREE.MeshStandardMaterial({ color: 0x62748c, metalness: 0.55, roughness: 0.45 }),  // steel blue-grey (was bronze)
   arcHood:      new THREE.MeshStandardMaterial({ color: 0x0e2c3c }),  // dark blue-teal hood (shifted off green)
@@ -808,6 +1095,12 @@ const M = {
   waterSurf:    new THREE.MeshStandardMaterial({ color: 0x3a9fe0, transparent: true, opacity: 0.52, roughness: 0.0, metalness: 0.5, depthWrite: false }),
   hillGrass:    new THREE.MeshStandardMaterial({ color: 0x3a8040, roughness: 0.88 }),
   hillDark:     new THREE.MeshStandardMaterial({ color: 0x2d6030, roughness: 0.95 }),
+  // Mountains — blocky border ranges + interior outcrops (tints swap per biome in applyBiome)
+  mtRock:       new THREE.MeshStandardMaterial({ color: 0x5f6874, roughness: 0.94 }),
+  mtRockDark:   new THREE.MeshStandardMaterial({ color: 0x454d58, roughness: 0.96 }),
+  mtSnow:       new THREE.MeshStandardMaterial({ color: 0xeaf4fc, roughness: 0.85 }),
+  mtGlow:       new THREE.MeshStandardMaterial({ color: 0xff6622, emissive: 0xff3300, emissiveIntensity: 1.6 }),
+  mtCrystal:    new THREE.MeshStandardMaterial({ color: 0xcc66ff, emissive: 0x9922ee, emissiveIntensity: 1.3 }),
   castleHPBarBg:new THREE.MeshBasicMaterial({ color: 0x330000 }),
   castleHPBarFg:new THREE.MeshBasicMaterial({ color: 0x22ff44, side: THREE.DoubleSide }),
   // Lanterns
@@ -876,6 +1169,29 @@ for (const m of Object.values(M)) markMaterialShared(m);
     if (skipKeys.has(key)) return;
     if (mat.isMeshStandardMaterial) { mat.flatShading = true; mat.needsUpdate = true; }
   });
+})();
+
+// ── Hand-painted grain on STRUCTURAL materials ──────────────────────────────
+// The creature/soldier bodies (pxMat) already carry a neutral darkening grain;
+// the stone, wood, cloth and metal of buildings & siege engines did not, so
+// they read as flat plastic next to the grained units. Apply the same shared
+// grain map here (colour stays in the material; the map only darkens), keyed by
+// surface type for the right pattern. Skipped: ground (grassA/pathMat take
+// biome ground textures), pure-glow emissives, and anything already mapped.
+(function applyStructuralGrain() {
+  // stone → pitting speckles · wood/metal → grain banding · cloth → soft noise
+  const STONE = ['castleStone','castleLight','castleDark','towerBase','wallStone','rockMat','enemyRock','spikeMetal','catMetal','mtRock','mtRockDark'];
+  const WOOD  = ['catWood','ballistaWood','ballistaArm','mageStaff','trollClub','spikeBase','arcBelt','towerRoof','catapult'];
+  const CLOTH = ['castleFlag','spCape','mageBeard','swShield','arcHood','orcTusk'];
+  const tex = (opts) => _neutralPxTex(opts);
+  const assign = (keys, opts) => keys.forEach(k => {
+    const m = M[k];
+    if (!m || m.map) return;          // skip missing or already-textured
+    m.map = tex(opts); m.needsUpdate = true;
+  });
+  assign(STONE, { spots: true });
+  assign(WOOD,  { stripes: true });
+  assign(CLOTH, {});
 })();
 
 // ─────────────────────────────────────────────
@@ -1650,6 +1966,11 @@ function buildTree(x, z, scale = 1.0) {
   f3.position.y = 2.42*scale; g.add(f3);
   const f4 = mesh(box(0.22*scale, 0.34*scale, 0.22*scale), M.treeFoliage);
   f4.position.y = 2.78*scale; g.add(f4);
+  // Leafy tufts poking out of the canopy sides — breaks up the stacked-box silhouette
+  const tuft1 = mesh(box(0.30*scale, 0.22*scale, 0.26*scale), M.treeFoliage2);
+  tuft1.position.set(0.56*scale, 1.32*scale, 0.18*scale); g.add(tuft1);
+  const tuft2 = mesh(box(0.26*scale, 0.20*scale, 0.28*scale), M.treeFoliage);
+  tuft2.position.set(-0.44*scale, 1.80*scale, -0.28*scale); g.add(tuft2);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.28 * scale }); // trunk collision radius
@@ -1670,6 +1991,16 @@ function buildPine(x, z, scale = 1.0) {
   // Snow cap on top
   const snow = mesh(box(0.18*scale, 0.12*scale, 0.18*scale), new THREE.MeshStandardMaterial({ color: 0xeef8ff }));
   snow.position.y = 1.92*scale; g.add(snow);
+  // Root flares at the trunk base
+  [[0.14, 0], [-0.10, 0.11], [-0.08, -0.13]].forEach(([rx, rz]) => {
+    const root = mesh(box(0.11*scale, 0.10*scale, 0.11*scale), M.pineTrunk);
+    root.position.set(rx*scale, 0.05*scale, rz*scale); g.add(root);
+  });
+  // Dead branch stubs poking through the lower tiers
+  const stub1 = mesh(box(0.26*scale, 0.05*scale, 0.05*scale), M.pineTrunk);
+  stub1.position.set(0.50*scale, 0.62*scale, 0.08*scale); stub1.rotation.z = 0.12; g.add(stub1);
+  const stub2 = mesh(box(0.05*scale, 0.05*scale, 0.22*scale), M.pineTrunk);
+  stub2.position.set(-0.10*scale, 0.94*scale, -0.42*scale); stub2.rotation.x = -0.14; g.add(stub2);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.22 * scale });
@@ -1699,6 +2030,14 @@ function buildPalm(x, z, scale = 1.0) {
     const cn = mesh(box(0.1*scale, 0.1*scale, 0.1*scale), M.palmTrunk);
     cn.position.set((ci-1)*0.14*scale, 1.96*scale, (ci%2===0?0.1:-0.1)*scale); g.add(cn);
   }
+  // Fibrous trunk ring bands
+  const ring1 = mesh(box(0.26*scale, 0.06*scale, 0.26*scale), M.spLeather);
+  ring1.position.set(0, 0.62*scale, 0); g.add(ring1);
+  const ring2 = mesh(box(0.26*scale, 0.06*scale, 0.26*scale), M.spLeather);
+  ring2.position.set(0.06*scale, 1.28*scale, 0); g.add(ring2);
+  // Fallen coconut resting at the base
+  const fallen = mesh(box(0.11*scale, 0.10*scale, 0.11*scale), M.palmTrunk);
+  fallen.position.set(0.34*scale, 0.03*scale, -0.26*scale); fallen.rotation.y = 0.6; g.add(fallen);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.22 * scale });
@@ -1731,6 +2070,16 @@ function buildCactus(x, z, scale = 1.0) {
     s.position.set((Math.cos(si*Math.PI/4))*0.16*scale, (0.3+si*0.15)*scale, (Math.sin(si*Math.PI/4))*0.16*scale);
     g.add(s);
   }
+  // Desert bloom crowning the main column
+  const bloom = mesh(box(0.14*scale, 0.08*scale, 0.14*scale), M.mushCap);
+  bloom.position.y = 1.60*scale; g.add(bloom);
+  const bloomHeart = mesh(box(0.07*scale, 0.06*scale, 0.07*scale), M.mushSpot);
+  bloomHeart.position.y = 1.66*scale; g.add(bloomHeart);
+  // Baby barrel cactus at the base
+  const pup = mesh(box(0.16*scale, 0.22*scale, 0.16*scale), M.cactus);
+  pup.position.set(-0.36*scale, 0.11*scale, 0.28*scale); g.add(pup);
+  const pupTop = mesh(box(0.10*scale, 0.08*scale, 0.10*scale), M.cactus);
+  pupTop.position.set(-0.36*scale, 0.25*scale, 0.28*scale); g.add(pupTop);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.24 * scale });
@@ -1762,6 +2111,17 @@ function buildDeadTree(x, z, scale = 1.0) {
     sub.rotation.z = rz + 0.4;
     g.add(sub);
   });
+  // Crow perched on the upper branch
+  const crowBody = mesh(box(0.10*scale, 0.09*scale, 0.09*scale), M.towerRoof);
+  crowBody.position.set(0.44*scale, 1.43*scale, 0.02*scale); g.add(crowBody);
+  const crowHead = mesh(box(0.06*scale, 0.06*scale, 0.06*scale), M.towerRoof);
+  crowHead.position.set(0.49*scale, 1.51*scale, 0.02*scale); g.add(crowHead);
+  // Hollow knot in the trunk
+  const knot = mesh(box(0.10*scale, 0.13*scale, 0.05*scale), M.towerRoof);
+  knot.position.set(0.04*scale, 0.86*scale, 0.12*scale); g.add(knot);
+  // Weathered stone at the roots
+  const dtRock = mesh(box(0.15*scale, 0.10*scale, 0.13*scale), M.rockDark);
+  dtRock.position.set(-0.26*scale, 0.05*scale, 0.18*scale); dtRock.rotation.y = 0.7; g.add(dtRock);
   g.position.set(x, 0, z);
   scene.add(g);
   staticObstacles.push({ x, z, r: 0.20 * scale });
@@ -1778,6 +2138,11 @@ function buildMushroom(x, z, scale = 1.0) {
   // Cap underside
   const capU = mesh(box(0.9*scale, 0.12*scale, 0.9*scale), M.mushStem);
   capU.position.y = 0.73*scale; g.add(capU);
+  // Radial gill fins hanging under the cap rim
+  [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4].forEach(ga => {
+    const gill = mesh(box(0.84*scale, 0.10*scale, 0.06*scale), M.skelBone);
+    gill.position.y = 0.625*scale; gill.rotation.y = ga; g.add(gill);
+  });
   // Cap top
   const cap = mesh(box(1.0*scale, 0.38*scale, 1.0*scale), M.mushCap);
   cap.position.y = 0.98*scale; g.add(cap);
@@ -1856,6 +2221,17 @@ function buildRock(x, z, scale, rng) {
     peb.rotation.y = rng() * Math.PI * 2;
     g.add(peb);
   }
+  // Moss patches draped over the boulder top (biome-tinted foliage colour)
+  if (rng() > 0.35) {
+    const m1 = mesh(box(bw * 0.55, 0.045, bd * 0.45), M.treeFoliage);
+    m1.position.set((rng() - 0.5) * bw * 0.3, bh - 0.04, (rng() - 0.5) * bd * 0.3);
+    m1.rotation.y = main.rotation.y;
+    g.add(m1);
+    const m2 = mesh(box(bw * 0.30, 0.04, bd * 0.32), M.treeFoliage2);
+    m2.position.set((rng() - 0.5) * bw * 0.4, bh - 0.015, (rng() - 0.5) * bd * 0.35);
+    m2.rotation.y = main.rotation.y + 0.4;
+    g.add(m2);
+  }
   g.position.set(x, 0, z);
   g.scale.setScalar(scale);
   scene.add(g);
@@ -1885,6 +2261,174 @@ function buildPond(cells) {
   });
 }
 
+// ─────────────────────────────────────────────
+//  MOUNTAINS — Minecraft-style stepped box ranges outside the grid + interior outcrops
+// ─────────────────────────────────────────────
+const mountainGroup = new THREE.Group(); // border-range meshes live here (outside the playable grid)
+scene.add(mountainGroup);
+let _mountainsActive = false; // set by buildScenery(); cleared by map-editor Clear All
+
+// Border ranges are deterministic per biome (seeded RNG), so cache the built Group
+// per biome index and detach/attach instead of disposing + reallocating ~250
+// BoxGeometry every biome switch (~every 3 waves in endless). Disposed only by
+// map-editor Clear All via disposeMountainCache().
+const _mtCache = new Map();  // biomeIdx → THREE.Group
+let _mtTarget = mountainGroup; // group _mtPeak adds meshes to (set by buildBorderMountains)
+
+function disposeMountainCache() {
+  for (const g of _mtCache.values()) {
+    g.traverse(o => { if (o.isMesh) o.geometry.dispose(); }); // materials are shared palette entries
+  }
+  _mtCache.clear();
+  for (let i = mountainGroup.children.length - 1; i >= 0; i--) mountainGroup.remove(mountainGroup.children[i]);
+}
+
+// Per-biome mountain dressing: rock tints + peak cap style. Falls back to Meadow.
+const MOUNTAIN_STYLE = {
+  Meadow:   { rock: 0x5f6874, dark: 0x454d58, cap: 'snow', capMinH: 8.5 },
+  Desert:   { rock: 0xc09858, dark: 0x8f6f3c, cap: 'mesa' },
+  Icelands: { rock: 0x9db8cc, dark: 0x6e8ba0, cap: 'snow', capMinH: 0 },
+  Lava:     { rock: 0x2c1a12, dark: 0x1a0e08, cap: 'ember', glow: 0xff6622, glowEm: 0xff3300 },
+  Mordor:   { rock: 0x2e2620, dark: 0x1c1712, cap: 'ember', glow: 0xdd6611, glowEm: 0x993300 },
+  Doom:     { rock: 0x241018, dark: 0x140810, cap: 'ember', glow: 0xff2255, glowEm: 0xcc0033 },
+  Vibe:     { rock: 0x352050, dark: 0x221238, cap: 'crystal' },
+};
+
+// Quantize widths to half-blocks so tier steps read as hard Minecraft ledges
+const _mtQ = v => Math.max(0.5, Math.round(v * 2) / 2);
+
+// One stepped peak: 2-4 stacked shrinking boxes + a per-biome cap.
+// `face` is a unit vector pointing back INTO the field (aims ember crevices at the player).
+// Border peaks are far outside the shadow camera → shadows off keeps them cheap.
+function _mtPeak(px, pz, h, baseW, rng, style, face) {
+  const mesa  = style.cap === 'mesa';
+  const tiers = mesa ? 2 + Math.floor(rng() * 2) : 3 + Math.floor(rng() * 2); // mesa 2-3, rock 3-4
+  let cx = px, cz = pz;
+  let w = baseW, d = baseW * (0.8 + rng() * 0.4);
+  let y = -0.5; // base sinks below the void-plane top — no floating seams
+  let bw = 0, bd = 0;
+  for (let t = 0; t < tiers; t++) {
+    bw = _mtQ(w); bd = _mtQ(d);
+    const th = (h / tiers) * (mesa ? (t === 0 ? 1.3 : 0.75) : 0.8 + rng() * 0.5);
+    const m = new THREE.Mesh(box(bw, th, bd), t % 2 === 0 ? M.mtRock : M.mtRockDark);
+    m.position.set(cx, y + th / 2, cz);
+    m.castShadow = false; m.receiveShadow = false;
+    _mtTarget.add(m);
+    y += th;
+    // Volcanic biomes: emissive lava crevice glowing through a seam on the field-facing side
+    if (style.cap === 'ember' && t < 2 && rng() < 0.55) {
+      const cw = 0.3 + rng() * 0.3;
+      const cGeo = face[0] === 0 ? box(cw, th * 0.55, 0.3) : box(0.3, th * 0.55, cw);
+      const cm = new THREE.Mesh(cGeo, M.mtGlow);
+      cm.position.set(
+        cx + face[0] * (bw / 2) + (face[0] === 0 ? (rng() - 0.5) * bw * 0.5 : 0),
+        y - th * 0.45,
+        cz + face[1] * (bd / 2) + (face[1] === 0 ? (rng() - 0.5) * bd * 0.5 : 0));
+      cm.castShadow = false; cm.receiveShadow = false;
+      _mtTarget.add(cm);
+    }
+    // Next tier: hard shrink + small off-centre drift that always stays on top of this tier
+    const nw = w * ((mesa ? 0.74 : 0.60) + rng() * 0.12);
+    const nd = d * ((mesa ? 0.74 : 0.60) + rng() * 0.12);
+    cx += (rng() - 0.5) * Math.max(0, (bw - _mtQ(nw)) / 2 - 0.2);
+    cz += (rng() - 0.5) * Math.max(0, (bd - _mtQ(nd)) / 2 - 0.2);
+    w = nw; d = nd;
+  }
+  // Per-biome peak caps
+  if (style.cap === 'snow' && h >= (style.capMinH || 0)) {
+    const sw = _mtQ(bw * 0.9), sd = _mtQ(bd * 0.9), sh = 0.5 + rng() * 0.5;
+    const cap = new THREE.Mesh(box(sw, sh, sd), M.mtSnow);
+    cap.position.set(cx, y + sh / 2, cz);
+    cap.castShadow = false; cap.receiveShadow = false;
+    _mtTarget.add(cap);
+  } else if (mesa) {
+    // Desert mesa: flat caprock slab slightly wider than the top tier
+    const cap = new THREE.Mesh(box(bw + 0.5, 0.4, bd + 0.5), M.mtRockDark);
+    cap.position.set(cx, y + 0.2, cz);
+    cap.castShadow = false; cap.receiveShadow = false;
+    _mtTarget.add(cap);
+  } else if (style.cap === 'crystal') {
+    const spikes = 1 + Math.floor(rng() * 2);
+    for (let i = 0; i < spikes; i++) {
+      const cw2 = 0.35 + rng() * 0.3, chh = 1.4 + rng() * 1.8;
+      const sp = new THREE.Mesh(box(cw2, chh, cw2), M.mtCrystal);
+      sp.position.set(cx + (rng() - 0.5) * bw * 0.5, y + chh / 2 - 0.2, cz + (rng() - 0.5) * bd * 0.5);
+      sp.castShadow = false; sp.receiveShadow = false;
+      _mtTarget.add(sp);
+    }
+  }
+}
+
+// (Re)build the four border ranges. Deterministic per biome (seeded RNG), entirely
+// outside the playable grid, so gameplay/pathing can never be affected.
+function buildBorderMountains() {
+  const bIdx = Math.max(0, activeBiomeIdx);
+  // Detach whatever biome's range is currently attached (geometries stay cached)
+  for (let i = mountainGroup.children.length - 1; i >= 0; i--) mountainGroup.remove(mountainGroup.children[i]);
+  const cached = _mtCache.get(bIdx);
+  if (cached) { mountainGroup.add(cached); return; }
+  const style = MOUNTAIN_STYLE[BIOMES[bIdx]?.name] || MOUNTAIN_STYLE.Meadow;
+  let seed = (0x5EED ^ ((bIdx + 1) * 0x9E3779B9)) >>> 0;
+  const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+
+  const W = CFG.GRID_W, H = CFG.GRID_H;
+  // Walk along one edge dropping peaks. Peak centres sit `1.6 + baseW/2 + jitter` beyond
+  // the grid edge, so even the widest base can never overhang a playable tile.
+  function range(edge, from, to, step0, step1, h0, h1, back) {
+    let t = from + rng() * 2;
+    while (t < to) {
+      const baseW = 3.5 + rng() * 3.0 + (back ? 1.5 : 0);
+      const h     = h0 + rng() * (h1 - h0);
+      const off   = 1.6 + baseW / 2 + rng() * 2.2 + (back ? 4.5 : 0);
+      if      (edge === 'N') _mtPeak(t, -off,           h, baseW, rng, style, [0, 1]);
+      else if (edge === 'S') _mtPeak(t, (H - 1) + off + 2.5, h, baseW, rng, style, [0, -1]);
+      else if (edge === 'W') _mtPeak(-off, t,           h, baseW, rng, style, [1, 0]);
+      else                   _mtPeak((W - 1) + off, t,  h, baseW, rng, style, [-1, 0]);
+      t += step0 + rng() * (step1 - step0);
+    }
+  }
+  const biomeGrp = new THREE.Group();
+  _mtTarget = biomeGrp;
+  range('N', -8, W + 8, 4.5, 7.0, 6.0, 10.5, false); // main backdrop the camera faces
+  range('N', -4, W + 4, 9.0, 13,  9.0, 14.0, true);  // taller second row for depth
+  range('W', -4, H + 4, 5.5, 8.5, 6.0, 11.0, false); // flank ranges
+  range('E', -4, H + 4, 5.5, 8.5, 6.0, 11.0, false);
+  range('S', -4, W + 4, 8.0, 12,  6.0,  9.5, false); // sparse — closes the horizon when rotating
+  _mtTarget = mountainGroup;
+  _mtCache.set(bIdx, biomeGrp);
+  mountainGroup.add(biomeGrp);
+}
+
+// Interior rocky outcrop — 1-3 stacked stepped tiers on a single validated grass tile.
+// Blocks tower placement (tile becomes 'scenery') and pushes a unit-collision obstacle.
+function buildOutcrop(x, z, scale, rng) {
+  const g = new THREE.Group();
+  const tiers = 1 + Math.floor(rng() * 3);
+  let w = 1.0 + rng() * 0.25, d = 0.85 + rng() * 0.35, y = 0;
+  for (let t = 0; t < tiers; t++) {
+    const th = 0.4 + rng() * 0.3;
+    const m2 = mesh(box(w, th, d), t % 2 === 0 ? M.mtRock : M.mtRockDark);
+    m2.position.set(t ? (rng() - 0.5) * 0.15 : 0, y + th / 2, t ? (rng() - 0.5) * 0.15 : 0);
+    g.add(m2);
+    y += th; w *= 0.68 + rng() * 0.1; d *= 0.68 + rng() * 0.1;
+  }
+  // Rubble scattered at the base
+  const rub = 2 + Math.floor(rng() * 2);
+  for (let i = 0; i < rub; i++) {
+    const rw = 0.12 + rng() * 0.14, rh = 0.08 + rng() * 0.1;
+    const rb = mesh(box(rw, rh, rw), M.mtRockDark);
+    rb.position.set((rng() - 0.5) * 0.9, rh / 2, (rng() - 0.5) * 0.9);
+    g.add(rb);
+  }
+  g.position.set(x, 0, z);
+  g.scale.setScalar(scale);
+  scene.add(g);
+  staticObstacles.push({ x, z, r: 0.5 * scale });
+  const oc = grid[`${Math.round(x)},${Math.round(z)}`];
+  if (oc && oc.type === 'grass') oc.type = 'scenery';
+  return g;
+}
+
 function buildScenery() {
   _biomeTreeSpots.length = 0; // reset on each full scenery build
   // Union of ALL layout paths — these zones are always occupied across layout changes
@@ -1893,6 +2437,11 @@ function buildScenery() {
     expandPath(L.a).forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
     expandPath(L.b).forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
     expandPath(L.c).forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
+  }
+  // Also reserve any editor-drawn paths so regenerated scenery/outcrops never land
+  // on a hand-drawn custom-map route (no-op in normal play, where _mePaths is empty).
+  for (let pi = 0; pi < 3; pi++) {
+    for (const [c, r] of (_mePaths?.[pi] || [])) allPathKeys.add(`${c},${r}`);
   }
   // Castle zone
   for (let c = 65; c <= 71; c++) for (let r = 22; r <= 32; r++) allPathKeys.add(`${c},${r}`);
@@ -2062,6 +2611,25 @@ function buildScenery() {
     }
   }
 
+  // ── 5b. ROCKY OUTCROPS — stepped mini-mountains that block tower placement.
+  // Validated against the union of ALL layout paths with a 2-tile buffer, so no
+  // layout swap can ever put a path under (or adjacent to) one.
+  const nearPath2 = new Set();
+  allPathKeys.forEach(key => {
+    const [pc, pr] = key.split(',').map(Number);
+    for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 2; dr++) nearPath2.add(`${pc + dc},${pr + dr}`);
+  });
+  const outcropTarget = 4 + Math.floor(rng() * 3); // 4-6 per map
+  for (let tries = 0, placed = 0; tries < 90 && placed < outcropTarget; tries++) {
+    const c = 4 + Math.floor(rng() * (CFG.GRID_W - 10));
+    const r = 4 + Math.floor(rng() * (CFG.GRID_H - 8));
+    if (nearPath2.has(`${c},${r}`) || !canPlace(c, r, 1)) continue;
+    const og = buildOutcrop(c, r, 0.85 + rng() * 0.45, rng);
+    initialScenery.push({ group: og, col: c, row: r, type: 'outcrop' });
+    markUsed(c, r, 1);
+    placed++;
+  }
+
   // ── 6. ROCKS — scattered boulders and clusters across the landscape
   for (let c = 2; c < CFG.GRID_W - 2; c += 2) {
     for (let r = 2; r < CFG.GRID_H - 2; r += 2) {
@@ -2118,6 +2686,10 @@ function buildScenery() {
       }
     }
   }
+
+  // ── 9. BORDER MOUNTAIN RANGES — dramatic stepped peaks outside the playable grid
+  _mountainsActive = true;
+  buildBorderMountains();
 }
 
 // ─────────────────────────────────────────────
@@ -2186,6 +2758,9 @@ function makeLanternMesh() {
   // Finial spike atop cap
   const finA = mesh(box(0.06, 0.05, 0.06), M.lanternPost); finA.position.set(0, 1.01, 0.35); g.add(finA);
   const finB = mesh(box(0.03, 0.1, 0.03), M.lanternPost); finB.position.set(0, 1.065, 0.35); g.add(finB);
+  // Cobblestones packed around the post footing
+  const cobA = mesh(box(0.09, 0.06, 0.08), M.townStoneD); cobA.position.set(0.10, 0.03, 0.04); cobA.rotation.y = 0.4; g.add(cobA);
+  const cobB = mesh(box(0.07, 0.05, 0.08), M.townStoneD); cobB.position.set(-0.08, 0.025, -0.06); cobB.rotation.y = 1.2; g.add(cobB);
   return g;
 }
 
@@ -2311,15 +2886,35 @@ function _mbCottage(g, rng) {
   const chTop = mesh(box(0.26, 0.07, 0.26), M.townStone); chTop.position.set(chX, h + chH, 0); g.add(chTop);
   const chPot = mesh(box(0.11, 0.14, 0.11), M.townStoneD); chPot.position.set(chX, h + chH + 0.10, 0); g.add(chPot);
 
+  // Chimney smoke puffs (static stylised grey boxes drifting up)
+  [[0.02, 0.10, 0.02, 0.09], [-0.05, 0.28, 0.06, 0.12], [0.06, 0.50, -0.04, 0.15]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(chX + ox, h + chH + 0.20 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
+
   // Front windows with wooden surrounds
   const wY = 0.12 + baseH + uH * 0.52;
-  [w * 0.26, w > 1.0 ? -w * 0.26 : null].filter(Boolean).forEach(wx => {
+  [w * 0.26, w > 1.0 ? -w * 0.26 : null].filter(Boolean).forEach((wx, wi) => {
     const win = mesh(box(0.21, 0.25, 0.06), M.townWin); win.position.set(wx, wY, d / 2 + 0.02); g.add(win);
     // Wooden surround
     const wBot = mesh(box(0.26, 0.055, 0.065), M.townBeam); wBot.position.set(wx, wY - 0.15, d / 2 + 0.02); g.add(wBot);
     const wTop = mesh(box(0.26, 0.055, 0.065), M.townBeam); wTop.position.set(wx, wY + 0.15, d / 2 + 0.02); g.add(wTop);
     const wL = mesh(box(0.055, 0.26, 0.065), M.townBeam); wL.position.set(wx - 0.13, wY, d / 2 + 0.02); g.add(wL);
     const wR = mesh(box(0.055, 0.26, 0.065), M.townBeam); wR.position.set(wx + 0.13, wY, d / 2 + 0.02); g.add(wR);
+    // Open wooden shutters flanking the frame
+    [-0.20, 0.20].forEach(sx => {
+      const sh = mesh(box(0.09, 0.24, 0.045), M.townDoor); sh.position.set(wx + sx, wY, d / 2 + 0.025); g.add(sh);
+    });
+    // Flower box under the first window
+    if (wi === 0) {
+      const fb = mesh(box(0.24, 0.07, 0.08), M.townBeam); fb.position.set(wx, wY - 0.20, d / 2 + 0.06); g.add(fb);
+      [-0.06, 0.02, 0.08].forEach((fx, fi) => {
+        const fl = mesh(box(0.045, 0.05, 0.045), fi === 1 ? M.mushSpot : M.mushCap);
+        fl.position.set(wx + fx, wY - 0.15, d / 2 + 0.06); g.add(fl);
+      });
+    }
   });
 
   // Door + stone arch lintel
@@ -2388,6 +2983,21 @@ function _mbFarmhouse(g, rng) {
     const fp = mesh(box(0.06, 0.36, 0.06), M.townBeam); fp.position.set(-w / 2 - 0.06, 0.18, -d / 2 + fi * 0.34); g.add(fp);
   }
   const fence = mesh(box(0.05, 0.06, d * 0.55), M.townBeam); fence.position.set(-w / 2 - 0.06, 0.26, -d / 4); g.add(fence);
+
+  // Water trough along the fence line
+  const trough = mesh(box(0.20, 0.14, 0.44), M.townPlanks); trough.position.set(-w / 2 - 0.26, 0.07, d * 0.18); g.add(trough);
+  const trWater = mesh(box(0.14, 0.03, 0.38), M.waterShallow); trWater.position.set(-w / 2 - 0.26, 0.13, d * 0.18); trWater.castShadow = false; g.add(trWater);
+
+  // Crates stacked beside the barn doors
+  const crate = mesh(box(0.24, 0.24, 0.24), M.townPlanks); crate.position.set(-w * 0.42, 0.12, d / 2 + 0.24); g.add(crate);
+  const crate2 = mesh(box(0.19, 0.19, 0.19), M.townPlanks); crate2.position.set(-w * 0.42, 0.33, d / 2 + 0.24); g.add(crate2);
+  const crateX = mesh(box(0.42, 0.05, 0.05), M.townBeam); crateX.position.set(-w * 0.42 + 0.24, 0.19, d / 2 + 0.24); crateX.rotation.z = 1.0; g.add(crateX);
+
+  // Pitchfork leaning on the front wall
+  const pfHandle = mesh(box(0.045, 0.62, 0.045), M.townBeam);
+  pfHandle.position.set(w * 0.14, 0.31, d / 2 + 0.09); pfHandle.rotation.x = -0.22; g.add(pfHandle);
+  const pfHead = mesh(box(0.14, 0.10, 0.04), M.townIron);
+  pfHead.position.set(w * 0.14, 0.60, d / 2 + 0.025); g.add(pfHead);
 }
 
 // ── 3. Windmill ─────────────────────────────────────────────────────────────
@@ -2448,6 +3058,20 @@ function _mbWindmill(g, rng) {
 
   // Wooden platform at base
   const plat = mesh(box(tR * 2.3, 0.10, tR * 2.3), M.townPlanks); plat.position.y = 0.05; g.add(plat);
+
+  // Rear hoist beam under the cap with rope + hanging grain sack (opposite the sails)
+  const hoistLen = tR + 0.55;
+  const hoist = mesh(box(0.07, 0.07, hoistLen), M.townBeam); hoist.position.set(0, h - 0.06, -(hoistLen / 2) + 0.15); g.add(hoist);
+  const hoistRope = mesh(box(0.028, 0.42, 0.028), M.ballistaRope); hoistRope.position.set(0, h - 0.30, -(tR + 0.25)); g.add(hoistRope);
+  const hoistSack = mesh(box(0.15, 0.19, 0.15), M.spLeather); hoistSack.position.set(0, h - 0.58, -(tR + 0.25)); g.add(hoistSack);
+
+  // Rear loading hatch (planked door up the tower back face, under the hoist)
+  const hatch = mesh(box(0.24, 0.32, 0.06), M.townDoor); hatch.position.set(0, h * 0.80, -(tR * 0.76 + 0.01)); g.add(hatch);
+
+  // Grain sacks dropped on the ground beside the platform
+  const sackA = mesh(box(0.19, 0.24, 0.19), M.spLeather); sackA.position.set(tR * 1.35, 0.12, tR * 0.70); sackA.rotation.y = 0.5; g.add(sackA);
+  const sackB = mesh(box(0.16, 0.18, 0.16), M.spLeather); sackB.position.set(tR * 1.52, 0.09, tR * 0.18); sackB.rotation.y = 1.2; g.add(sackB);
+  const sackTie = mesh(box(0.21, 0.035, 0.21), M.arcBelt); sackTie.position.set(tR * 1.35, 0.20, tR * 0.70); sackTie.rotation.y = 0.5; g.add(sackTie);
 }
 
 // ── 4. Blacksmith ────────────────────────────────────────────────────────────
@@ -2499,6 +3123,25 @@ function _mbBlacksmith(g, rng) {
   // Barrel
   const barrel = mesh(box(0.18, 0.24, 0.18), M.townBeam); barrel.position.set(-w * 0.44, 0.12 + 0.14, d / 2 + 0.20); g.add(barrel);
   const bTop = mesh(box(0.20, 0.04, 0.20), M.townStoneD); bTop.position.set(-w * 0.44, 0.26 + 0.14, d / 2 + 0.20); g.add(bTop);
+
+  // Hanging trade sign — bracket arm + board with iron anvil silhouette
+  const sgBracket = mesh(box(0.05, 0.26, 0.05), M.townBeam); sgBracket.position.set(-w * 0.30, h - 0.11, d / 2 + 0.03); g.add(sgBracket);
+  const sgArm = mesh(box(0.05, 0.05, 0.28), M.townBeam); sgArm.position.set(-w * 0.30, h, d / 2 + 0.16); g.add(sgArm);
+  const sgBoard = mesh(box(0.30, 0.22, 0.05), M.townSign); sgBoard.position.set(-w * 0.30, h - 0.17, d / 2 + 0.28); g.add(sgBoard);
+  const sgAnvilB = mesh(box(0.13, 0.05, 0.07), M.townIron); sgAnvilB.position.set(-w * 0.30, h - 0.22, d / 2 + 0.32); g.add(sgAnvilB);
+  const sgAnvilT = mesh(box(0.17, 0.05, 0.07), M.townIron); sgAnvilT.position.set(-w * 0.30, h - 0.16, d / 2 + 0.32); g.add(sgAnvilT);
+
+  // Forge smoke above the chimney (static grey puffs)
+  [[0.03, 0.12, 0.02, 0.11], [-0.05, 0.34, -0.04, 0.15]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(-w * 0.30 + ox, h + 0.14 + chH + 0.10 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
+
+  // Iron ingot stack by the anvil
+  const ingA = mesh(box(0.16, 0.05, 0.07), M.catMetal); ingA.position.set(w * 0.24, 0.025, d / 2 + 0.42); g.add(ingA);
+  const ingB = mesh(box(0.16, 0.05, 0.07), M.catMetal); ingB.position.set(w * 0.26, 0.075, d / 2 + 0.40); ingB.rotation.y = 0.35; g.add(ingB);
 }
 
 // ── 5. Tavern / Inn ──────────────────────────────────────────────────────────
@@ -2559,6 +3202,27 @@ function _mbTavern(g, rng) {
   const bracket = mesh(box(0.055, 0.38, 0.055), M.townBeam); bracket.position.set(w * 0.44, 0.13 + h1 + 0.30, d / 2 + 0.16); g.add(bracket);
   const arm = mesh(box(0.055, 0.055, 0.30), M.townBeam); arm.position.set(w * 0.44, 0.13 + h1 + 0.44, d / 2 + 0.16); g.add(arm);
   const sign = mesh(box(0.38, 0.18, 0.06), M.townSign); sign.position.set(w * 0.44, 0.13 + h1 + 0.26, d / 2 + 0.30); g.add(sign);
+  // Golden ale mug emblem on the sign board
+  const mug = mesh(box(0.09, 0.11, 0.05), M.swGold); mug.position.set(w * 0.44 - 0.02, 0.13 + h1 + 0.26, d / 2 + 0.345); g.add(mug);
+  const mugHandle = mesh(box(0.035, 0.07, 0.045), M.swGold); mugHandle.position.set(w * 0.44 + 0.055, 0.13 + h1 + 0.26, d / 2 + 0.345); g.add(mugHandle);
+
+  // Door lantern (warm glow cube in an iron cap) beside the entrance
+  const dlGlow = mesh(box(0.09, 0.11, 0.09), M.townWin); dlGlow.position.set(0.24, 0.13 + h1 * 0.82, d / 2 + 0.055); dlGlow.castShadow = false; g.add(dlGlow);
+  const dlCap = mesh(box(0.12, 0.04, 0.12), M.townIron); dlCap.position.set(0.24, 0.13 + h1 * 0.82 + 0.075, d / 2 + 0.055); g.add(dlCap);
+
+  // Bench under the left window
+  const benchSeat = mesh(box(0.42, 0.05, 0.16), M.townPlanks); benchSeat.position.set(-w * 0.28, 0.20, d / 2 + 0.20); g.add(benchSeat);
+  [-0.16, 0.16].forEach(lx => {
+    const leg = mesh(box(0.06, 0.18, 0.12), M.townBeam); leg.position.set(-w * 0.28 + lx, 0.09, d / 2 + 0.20); g.add(leg);
+  });
+
+  // Chimney smoke puffs
+  [[0.03, 0.10, 0.02, 0.10], [-0.04, 0.30, -0.05, 0.13]].forEach(([ox, oy, oz, s]) => {
+    const puff = mesh(box(s, s, s), M.castleLight);
+    puff.position.set(w * 0.28 + ox, chBase + chH + 0.12 + oy, oz);
+    puff.castShadow = false;
+    g.add(puff);
+  });
 
   // Step + barrels by door
   const step2 = mesh(box(0.38, 0.07, 0.16), M.townStoneD); step2.position.set(0, 0.035, d / 2 + 0.12); g.add(step2);
@@ -2593,6 +3257,9 @@ function _mbChapel(g, rng) {
   const btower = mesh(box(btW, btH, btW), M.townStone); btower.position.set(0, btBase + btH / 2, d / 2 - btW * 0.45); g.add(btower);
   // Bell tower arched opening
   const bell = mesh(box(btW * 0.45, btH * 0.5, 0.06), M.townWin); bell.position.set(0, btBase + btH * 0.6, d / 2 - btW * 0.45 + btW / 2); g.add(bell);
+  // Golden bell hanging in the opening
+  const bellBody = mesh(box(btW * 0.24, btH * 0.28, 0.10), M.swGold); bellBody.position.set(0, btBase + btH * 0.58, d / 2 - btW * 0.45 + btW / 2 + 0.05); g.add(bellBody);
+  const bellClapper = mesh(box(0.045, 0.06, 0.045), M.townIron); bellClapper.position.set(0, btBase + btH * 0.40, d / 2 - btW * 0.45 + btW / 2 + 0.05); g.add(bellClapper);
   // Bell tower roof
   for (let s = 0; s < 4; s++) {
     const t = 1 - s / 4;
@@ -2618,6 +3285,19 @@ function _mbChapel(g, rng) {
   const door = mesh(box(dW, dH, 0.07), M.townDoor); door.position.set(0, 0.14 + dH / 2, d / 2 + 0.02); g.add(door);
   const arch2 = mesh(box(dW + 0.12, 0.14, 0.09), M.townStone); arch2.position.set(0, 0.14 + dH + 0.07, d / 2 + 0.02); g.add(arch2);
   const step3 = mesh(box(0.40, 0.07, 0.18), M.townStoneD); step3.position.set(0, 0.035, d / 2 + 0.12); g.add(step3);
+
+  // Gilded cross tracery over the front lancet window
+  const dcV = mesh(box(0.04, 0.34, 0.03), M.swGold); dcV.position.set(0, wY, d / 2 + 0.055); g.add(dcV);
+  const dcH = mesh(box(0.13, 0.04, 0.03), M.swGold); dcH.position.set(0, wY + 0.09, d / 2 + 0.055); g.add(dcH);
+
+  // Churchyard gravestones along the side wall
+  [[w / 2 + 0.24, -d * 0.10, 0.12, 0.20, 0.15], [w / 2 + 0.30, d * 0.16, 0.14, 0.16, -0.2], [w / 2 + 0.22, -d * 0.32, 0.11, 0.14, 0.35]].forEach(([gx, gz, gw, gh, tilt]) => {
+    const gs = mesh(box(gw, gh, 0.05), M.townStoneD);
+    gs.position.set(gx, gh / 2, gz); gs.rotation.y = 0.5 + tilt; gs.rotation.z = tilt * 0.3;
+    g.add(gs);
+  });
+  // Tiny stone cross topping the first grave
+  const gcV = mesh(box(0.035, 0.10, 0.035), M.townStoneD); gcV.position.set(w / 2 + 0.24, 0.24, -d * 0.10); gcV.rotation.y = 0.5; g.add(gcV);
 }
 
 // ── 7. Watchtower ────────────────────────────────────────────────────────────
@@ -2672,6 +3352,20 @@ function _mbWatchtower(g, rng) {
   [[h * 0.35, tW / 2], [h * 0.65, tW / 2]].forEach(([wy, wz]) => {
     const ws = mesh(box(0.09, 0.28, 0.08), M.townWin); ws.position.set(0, wy, wz + 0.01); g.add(ws);
   });
+
+  // Signal brazier on the parapet corner — iron bowl with live fire glow
+  const brStand = mesh(box(0.07, 0.14, 0.07), M.townIron); brStand.position.set(pw * 0.38, h + 0.23, -pw * 0.38); g.add(brStand);
+  const brBowl = mesh(box(0.20, 0.09, 0.20), M.townIron); brBowl.position.set(pw * 0.38, 0.345 + h, -pw * 0.38); g.add(brBowl);
+  const brFire = mesh(box(0.13, 0.13, 0.13), M.townForge); brFire.position.set(pw * 0.38, h + 0.45, -pw * 0.38); brFire.castShadow = false; g.add(brFire);
+  const brEmber = mesh(box(0.06, 0.09, 0.06), M.townForge); brEmber.position.set(pw * 0.38, h + 0.56, -pw * 0.38); brEmber.castShadow = false; g.add(brEmber);
+
+  // Royal banner hanging from the parapet lip
+  const bnCloth = mesh(box(0.26, 0.52, 0.045), M.castleFlag); bnCloth.position.set(-tW * 0.28, h - 0.24, tW / 2 + 0.055); g.add(bnCloth);
+  const bnTip = mesh(box(0.26, 0.06, 0.05), M.swGold); bnTip.position.set(-tW * 0.28, h - 0.53, tW / 2 + 0.055); g.add(bnTip);
+
+  // Kite shield mounted above the door
+  const shield = mesh(box(0.20, 0.26, 0.05), M.swShield); shield.position.set(0, dH + 0.34, tW / 2 + 0.045); g.add(shield);
+  const shieldBoss = mesh(box(0.07, 0.09, 0.045), M.swGold); shieldBoss.position.set(0, dH + 0.34, tW / 2 + 0.075); g.add(shieldBoss);
 }
 
 // ── Dispatcher + public wrappers ────────────────────────────────────────────
@@ -2720,6 +3414,16 @@ function buildWell(x, z, rng) {
   // Rope + bucket
   const rope = mesh(box(0.03, 0.26, 0.03), M.townBeam); rope.position.set(0, 0.76, 0); g.add(rope);
   const bucket = mesh(box(0.1, 0.1, 0.1), M.townMetal); bucket.position.set(0, 0.6, 0); g.add(bucket);
+  // Windlass spool on the crossbeam + iron crank handle
+  const spool = mesh(box(0.16, 0.11, 0.11), M.townPlanks); spool.position.set(0, 0.89, 0); g.add(spool);
+  const crankAxle = mesh(box(0.10, 0.045, 0.045), M.townIron); crankAxle.position.set(0.36, 0.89, 0); g.add(crankAxle);
+  const crankArm = mesh(box(0.04, 0.14, 0.04), M.townIron); crankArm.position.set(0.40, 0.82, 0); g.add(crankArm);
+  const crankGrip = mesh(box(0.04, 0.04, 0.10), M.townBeam); crankGrip.position.set(0.40, 0.76, 0.05); g.add(crankGrip);
+  // Water shimmer inside the shaft
+  const wellWater = mesh(box(0.38, 0.04, 0.38), M.waterShallow); wellWater.position.y = 0.28; wellWater.castShadow = false; g.add(wellWater);
+  // Mossy cobbles at the foot of the rim
+  const cob1 = mesh(box(0.12, 0.07, 0.10), M.townStoneD); cob1.position.set(0.38, 0.035, 0.24); cob1.rotation.y = 0.5; g.add(cob1);
+  const cob2 = mesh(box(0.09, 0.06, 0.09), M.townStoneD); cob2.position.set(-0.30, 0.03, -0.36); cob2.rotation.y = 1.1; g.add(cob2);
   g.position.set(x, 0, z);
   g.rotation.y = rng() * Math.PI * 2;
   scene.add(g);
@@ -2854,6 +3558,13 @@ function applyBiome(idx) {
 
   scene.background.setHex(b.bg);
   scene.fog.color.setHex(b.fog[0]); scene.fog.near = b.fog[1]; scene.fog.far = b.fog[2];
+  // Sky dome gradient: fog colour at the horizon (seamless terrain fade), bg at the zenith
+  skyDomeMat.uniforms.horizonColor.value.setHex(b.fog[0]);
+  skyDomeMat.uniforms.topColor.value.setHex(b.bg);
+  const cs = CLOUD_STYLE[b.name] || { color: 0xffffff, opacity: 0.9 };
+  cloudMat.color.setHex(cs.color);
+  cloudMat.opacity = cs.opacity;
+  _applyAmbientStyle(b.name);
 
   ambient.color.setHex(b.ambient[0]);   ambient.intensity   = b.ambient[1];
   sun.color.setHex(b.sun[0]);            sun.intensity       = b.sun[1];
@@ -2872,6 +3583,11 @@ function applyBiome(idx) {
 
   M.hillGrass.color.setHex(b.hill[0]);
   M.hillDark.color.setHex(b.hill[1]);
+  // Mountain rock tints (border ranges + interior outcrops share these)
+  const _ms = MOUNTAIN_STYLE[b.name] || MOUNTAIN_STYLE.Meadow;
+  M.mtRock.color.setHex(_ms.rock);
+  M.mtRockDark.color.setHex(_ms.dark);
+  if (_ms.glow) { M.mtGlow.color.setHex(_ms.glow); M.mtGlow.emissive.setHex(_ms.glowEm); }
   M.treeFoliage.color.setHex(b.foliage[0]);
   M.treeFoliage2.color.setHex(b.foliage[1]);
   if (b.treeMats) {
@@ -2897,6 +3613,9 @@ function applyBiome(idx) {
 
   // Swap tree meshes to match biome vegetation
   _rebuildBiomeTrees(i);
+  // Rebuild border mountain ranges with this biome's silhouette + dressing
+  // (guarded so map-editor Clear All keeps them gone until the next full scenery build)
+  if (_mountainsActive) buildBorderMountains();
 }
 
 // ─────────────────────────────────────────────
@@ -3093,6 +3812,27 @@ function buildCastle() {
   addFlag(g, 71, 5.0, 31.0);
   addFlag(g, 68.5, 9.75, 27);
 
+  // Fire braziers atop the two mid-gate pillars
+  [[66, 26], [66, 28]].forEach(([bx, bz]) => {
+    const stand = mesh(box(0.14, 0.18, 0.14), M.townIron); stand.position.set(bx, 3.89, bz); g.add(stand);
+    const bowl = mesh(box(0.34, 0.13, 0.34), M.townIron); bowl.position.set(bx, 4.04, bz); g.add(bowl);
+    const fire = mesh(box(0.22, 0.20, 0.22), M.townForge); fire.position.set(bx, 4.20, bz); fire.castShadow = false; g.add(fire);
+    const ember = mesh(box(0.10, 0.12, 0.10), M.townForge); ember.position.set(bx, 4.35, bz); ember.castShadow = false; g.add(ember);
+  });
+
+  // Long royal wall banners hanging on the keep's west face, flanking the entrance
+  [25.85, 28.15].forEach(bz => {
+    const cloth = mesh(box(0.08, 2.0, 0.55), M.castleFlag); cloth.position.set(66.72, 6.4, bz); g.add(cloth);
+    const rod = mesh(box(0.10, 0.08, 0.70), M.castleFlagPole); rod.position.set(66.70, 7.44, bz); g.add(rod);
+    const tip = mesh(box(0.09, 0.10, 0.55), M.swGold); tip.position.set(66.72, 5.35, bz); g.add(tip);
+  });
+
+  // Kite shields of the Order mounted on the flanking gate towers
+  [23, 31].forEach(sz => {
+    const sh = mesh(box(0.08, 0.42, 0.30), M.swShield); sh.position.set(65.31, 3.1, sz); g.add(sh);
+    const boss = mesh(box(0.06, 0.14, 0.10), M.swGold); boss.position.set(65.26, 3.1, sz); g.add(boss);
+  });
+
   // Wall-mounted torches flanking the gate openings
   const torchMat = new THREE.MeshStandardMaterial({ color: 0xff7700, emissive: 0xff5500, emissiveIntensity: 2.4 });
   const bracketMat = M.catMetal;
@@ -3275,6 +4015,10 @@ function spawnTroll(chosenPath) {
   // Tusks
   const tuskL = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskL.position.set( 0.14, 1.14, 0.30); tuskL.rotation.z = -0.18; g.add(tuskL);
   const tuskR = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskR.position.set(-0.14, 1.14, 0.30); tuskR.rotation.z = 0.18; g.add(tuskR);
+  // Bony back ridge — row of protruding spines down the spine (additive, rig-safe)
+  [[1.02, 0.28, -0.24], [0.82, 0.34, -0.26], [0.60, 0.28, -0.26]].forEach(([sy, sh, sz]) => {
+    const spine = mesh(box(0.12, sh, 0.12), M.orcTusk); spine.position.set(0, sy, sz); spine.rotation.x = -0.5; g.add(spine);
+  });
   _pushEnemy(g, 'troll', legL, legR, body, head, 1.95, chosenPath, armL, armR);
 }
 
@@ -3334,6 +4078,14 @@ function spawnSkeleton(chosenPath) {
   for (let ti = 0; ti < 4; ti++) {
     const tooth = mesh(box(0.04, 0.06, 0.04), bMat); tooth.position.set(-0.12 + ti * 0.08, 0.87, 0.17); g.add(tooth);
   }
+  // Rusted sword gripped in the right hand + a tattered burial shroud (additive)
+  const skGrip  = mesh(box(0.05, 0.16, 0.05), M.arcBelt); skGrip.position.set(-0.30, 0.42, 0.16); g.add(skGrip);
+  const skGuard = mesh(box(0.22, 0.04, 0.05), M.catMetal); skGuard.position.set(-0.30, 0.52, 0.16); g.add(skGuard);
+  const skBlade = mesh(box(0.06, 0.40, 0.03), M.weapon);   skBlade.position.set(-0.30, 0.76, 0.16); g.add(skBlade);
+  const skNick  = mesh(box(0.07, 0.05, 0.04), M.castleDark); skNick.position.set(-0.30, 0.70, 0.165); g.add(skNick); // chipped edge
+  const skTip   = mesh(box(0.04, 0.10, 0.02), M.weapon);   skTip.position.set(-0.30, 0.98, 0.16); g.add(skTip);
+  const shroud1 = mesh(box(0.36, 0.34, 0.05), M.arcHood);  shroud1.position.set(0.02, 0.72, -0.13); g.add(shroud1);
+  const shroud2 = mesh(box(0.18, 0.16, 0.05), M.arcHood);  shroud2.position.set(0.13, 0.50, -0.14); g.add(shroud2); // ragged tail
   _pushEnemy(g, 'skeleton', legL, legR, body, head, 1.55, chosenPath, armL, armR);
 }
 
@@ -3392,6 +4144,11 @@ function spawnWolf(chosenPath) {
     return lower; // return as animation proxy
   });
   const [legFL, legFR, legBL, legBR] = legMeshes;
+  // Spiked iron war-collar around the neck — marks this as a trained dire-wolf (additive)
+  const collar = mesh(box(0.36, 0.14, 0.36), M.arcBelt); collar.position.set(0.34, 0.46, 0); wi.add(collar);
+  [[0, 0.15], [0.15, 0], [0, -0.15], [-0.11, 0.10], [-0.11, -0.10]].forEach(([cx, cz]) => {
+    const stud = mesh(box(0.06, 0.11, 0.06), M.catMetal); stud.position.set(0.34 + cx, 0.52, cz); stud.rotation.x = cz * 1.5; wi.add(stud);
+  });
   _pushEnemy(g, 'wolf', legFL, legBR, body, head, 0.95, chosenPath);
   const w = orcs[orcs.length - 1];
   w.legFR = legFR; w.legBL = legBL;
@@ -3447,6 +4204,10 @@ function spawnSpider(chosenPath) {
     const eyeSz = ei < 2 ? 0.09 : 0.06;
     const eye = mesh(box(eyeSz,eyeSz,0.04), M.spiderEye); eye.position.set(x+0.20, y, z); g.add(eye);
   });
+  // Coarse bristles on the abdomen — makes it read as a hairy, creepy hunter (additive)
+  [[-0.22,0.50,0.12],[-0.30,0.47,-0.08],[-0.14,0.47,-0.06],[-0.36,0.40,0.08],[-0.10,0.42,0.14]].forEach(([bx,by,bz]) => {
+    const bristle = mesh(box(0.035, 0.13, 0.035), bMat); bristle.position.set(bx, by, bz); bristle.rotation.x = bz * 1.4; bristle.rotation.z = bx * 0.6; g.add(bristle);
+  });
   _pushEnemy(g, 'spider', null, null, cthorax, abdomen, 0.7, chosenPath);
 }
 
@@ -3495,6 +4256,12 @@ function spawnCyclops(chosenPath) {
   // Horns
   const hornL = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornL.position.set( 0.32, 2.42, 0); hornL.rotation.z =  0.35; g.add(hornL);
   const hornR = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornR.position.set(-0.32, 2.42, 0); hornR.rotation.z = -0.35; g.add(hornR);
+  // Ragged hide kilt + a bone bandolier of trophies slung across the chest (additive)
+  const kiltF = mesh(box(0.92, 0.44, 0.14), M.arcBelt);  kiltF.position.set(0, 0.60, 0.34); g.add(kiltF);
+  const kiltB = mesh(box(0.92, 0.44, 0.14), M.spLeather); kiltB.position.set(0, 0.60, -0.34); g.add(kiltB);
+  const belt  = mesh(box(1.00, 0.14, 0.86), M.spLeather); belt.position.set(0, 0.80, 0); g.add(belt);
+  const bandolier = mesh(box(0.16, 1.05, 0.10), M.spLeather); bandolier.position.set(0.06, 1.15, 0.46); bandolier.rotation.z = 0.5; g.add(bandolier);
+  [[0.34,1.42],[0.20,1.18],[0.06,0.94]].forEach(([bx,by]) => { const bone = mesh(box(0.11,0.11,0.07), M.orcTusk); bone.position.set(bx, by, 0.49); g.add(bone); });
   _pushEnemy(g, 'cyclops', legL, legR, body, head, 2.7, chosenPath, armL, armR);
 }
 
@@ -3559,6 +4326,10 @@ function spawnEnemyArcher(chosenPath) {
     const shaft = mesh(box(0.025,0.26,0.025), bMat);
     shaft.position.set(0.12 + ai*0.04, 1.0, -0.2); g.add(shaft);
   }
+  // Ragged torn strips at the cloak hem — sinister, weathered silhouette (additive)
+  [[-0.15,-0.06],[0,-0.10],[0.15,-0.05]].forEach(([tx,ty]) => {
+    const tatter = mesh(box(0.10, 0.16, 0.06), hMat); tatter.position.set(tx, ty, -0.21); g.add(tatter);
+  });
   _pushEnemy(g, 'enemyArcher', legL, legR, body, head, 1.65, chosenPath, armL, armR);
   orcs[orcs.length - 1].weapon = bowPivot;
 }
@@ -3607,6 +4378,11 @@ function spawnGenericOrc(orcType, chosenPath) {
     });
     // Crude leather loincloth flap
     const loin = mesh(box(0.28, 0.24, 0.08), M.arcBelt); loin.position.set(0, 0.42, 0.22); g.add(loin);
+    // Savage fur shoulder mantle + a bone trophy necklace (additive, rig-safe)
+    const mantle  = mesh(box(0.66, 0.16, 0.46), M.arcBelt);   mantle.position.set(0, 0.93, -0.02); g.add(mantle);
+    const mantleR = mesh(box(0.70, 0.10, 0.40), M.spLeather); mantleR.position.set(0, 0.86, -0.04); g.add(mantleR);
+    const boneNeck = mesh(box(0.34, 0.05, 0.09), M.orcTusk);  boneNeck.position.set(0, 0.84, 0.19); g.add(boneNeck);
+    [-0.10, 0, 0.10].forEach(bx => { const fang = mesh(box(0.04, 0.10, 0.04), M.orcTusk); fang.position.set(bx, 0.78, 0.20); g.add(fang); });
   }
 
   if (orcType === 'brute') {
@@ -3621,6 +4397,13 @@ function spawnGenericOrc(orcType, chosenPath) {
     const axeShaft = mesh(box(0.09, 0.72, 0.09), M.trollClub); axeShaft.position.set(-0.08, -0.34, 0.08); armR.add(axeShaft);
     const axeHeadT = mesh(box(0.38, 0.16, 0.09), M.catMetal); axeHeadT.position.set(-0.08,  0.04, 0.08); armR.add(axeHeadT);
     const axeHeadB = mesh(box(0.32, 0.14, 0.09), M.catMetal); axeHeadB.position.set(-0.08, -0.10, 0.08); armR.add(axeHeadB);
+    // Iron shoulder spikes + a ragged war-banner lashed to the back (additive)
+    [[0.43,0.10],[0.43,-0.10],[-0.43,0.10],[-0.43,-0.10]].forEach(([sx,sz]) => {
+      const spike = mesh(box(0.07, 0.20, 0.07), M.orcTusk); spike.position.set(sx, 1.02, sz); g.add(spike);
+    });
+    const bnPole  = mesh(box(0.05, 0.96, 0.05), M.trollClub); bnPole.position.set(0.30, 1.05, -0.22); g.add(bnPole);
+    const bnFlag  = mesh(box(0.04, 0.36, 0.34), M.bruteBody); bnFlag.position.set(0.30, 1.34, -0.40); g.add(bnFlag);
+    const bnSkull = mesh(box(0.10, 0.10, 0.08), M.orcTusk);   bnSkull.position.set(0.30, 1.56, -0.22); g.add(bnSkull); // skull finial
   }
 
   if (orcType === 'boss') {
@@ -3634,6 +4417,10 @@ function spawnGenericOrc(orcType, chosenPath) {
     const gsGuard = mesh(box(0.46, 0.09, 0.09), M.catMetal); gsGuard.position.set(-0.04, -0.14, 0.08); armR.add(gsGuard);
     const gsBlade = mesh(box(0.09, 0.72, 0.06), M.weapon); gsBlade.position.set(-0.04,  0.28, 0.08); armR.add(gsBlade);
     const gsTip   = mesh(box(0.06, 0.18, 0.04), M.weapon); gsTip.position.set(-0.04,  0.70, 0.08); armR.add(gsTip);
+    // Tattered warlord cape hanging from a gold gorget (additive, rig-safe)
+    const capeGorget = mesh(box(0.56, 0.10, 0.07), M.castleFlagPole); capeGorget.position.set(0, 0.96, -0.20); g.add(capeGorget);
+    const capeWarU   = mesh(box(0.54, 0.52, 0.05), M.bossBody);       capeWarU.position.set(0, 0.62, -0.245); g.add(capeWarU);
+    const capeWarL   = mesh(box(0.46, 0.26, 0.05), M.bossBody);       capeWarL.position.set(0, 0.27, -0.27); capeWarL.rotation.x = -0.05; g.add(capeWarL);
   }
 
   const headSize = orcType === 'boss' ? 0.50 : 0.44;
@@ -3735,6 +4522,10 @@ function spawnExploder(chosenPath) {
   // Lit fuse sprouting from the back/top — dark cord with a glowing ember tip
   const fuseCord = mesh(box(0.05, 0.22, 0.05), M.trollClub); fuseCord.position.set(0.10, 1.42, -0.06); fuseCord.rotation.z = -0.3; g.add(fuseCord);
   const fuseEmber = mesh(box(0.09, 0.09, 0.09), M.exploderBelly); fuseEmber.position.set(0.17, 1.54, -0.06); g.add(fuseEmber);
+  // Jagged scrap-metal shrapnel embedded in the hide — telegraphs a deadly blast (additive)
+  [[0.30,0.74,0.28,0.5],[-0.28,0.58,0.30,-0.6],[0.12,0.88,0.26,0.2],[-0.16,0.48,0.30,-0.35],[0.26,0.44,0.28,0.7]].forEach(([sx,sy,sz,rz]) => {
+    const shard = mesh(box(0.06, 0.17, 0.06), M.catMetal); shard.position.set(sx, sy, sz); shard.rotation.z = rz; shard.rotation.x = -0.4; g.add(shard);
+  });
   _pushEnemy(g, 'exploder', legL, legR, torso, head, 1.55, chosenPath, armL, armR);
   // Attach belly + eye refs so the update loop can pulse them (ember pulses with the belly)
   const last = orcs[orcs.length - 1];
@@ -3779,6 +4570,12 @@ function spawnHealerOrc(chosenPath) {
   const hband = mesh(box(0.48, 0.10, 0.10), M.orcTusk); hband.position.set(0, 1.30, 0.22); g.add(hband);
   const eL = mesh(box(0.09, 0.08, 0.07), M.orcEye); eL.position.set( 0.13, 1.14, 0.21); g.add(eL);
   const eR = mesh(box(0.09, 0.08, 0.07), M.orcEye); eR.position.set(-0.13, 1.14, 0.21); g.add(eR);
+  // Shaman skull-totem lashed below the staff crystal, with glowing eye sockets (additive)
+  const totemSkull = mesh(box(0.17, 0.16, 0.14), M.orcTusk);   totemSkull.position.set(0, -0.02, 0.06); armR.add(totemSkull);
+  const totemJaw   = mesh(box(0.14, 0.05, 0.11), M.orcTusk);   totemJaw.position.set(0, -0.11, 0.09);  armR.add(totemJaw);
+  const totemEyeL  = mesh(box(0.045,0.05, 0.03), M.healerGlow); totemEyeL.position.set( 0.045, 0.0, 0.13); armR.add(totemEyeL);
+  const totemEyeR  = mesh(box(0.045,0.05, 0.03), M.healerGlow); totemEyeR.position.set(-0.045, 0.0, 0.13); armR.add(totemEyeR);
+  const fetishC    = mesh(box(0.05, 0.16, 0.05), M.orcTusk);   fetishC.position.set(0, 0.60, -0.30); g.add(fetishC); // extra back charm
   _pushEnemy(g, 'healerOrc', legL, legR, body, head, 1.60, chosenPath, armL, armR);
 }
 
@@ -3839,6 +4636,11 @@ function spawnOrcMage(chosenPath) {
   const sClawR  = mesh(box(0.06, 0.22, 0.06), M.mageStaff); sClawR.position.set(-0.12, 1.68, 0); sClawR.rotation.z =  0.38; staffPivot.add(sClawR);
   // Glowing dark orb — unique per-enemy clone so we can animate its emissiveIntensity
   const staffOrb = mesh(box(0.24, 0.24, 0.24), M.orcMageOrbMat.clone()); staffOrb.position.y = 1.73; staffPivot.add(staffOrb);
+  // Skull talisman hung from the belt + curved shoulder horns — dark-sorcerer menace (additive)
+  const talis    = mesh(box(0.12, 0.12, 0.07), M.orcTusk); talis.position.set(0.22, 0.44, 0.29); g.add(talis);
+  const talisJaw = mesh(box(0.10, 0.05, 0.06), M.orcTusk); talisJaw.position.set(0.22, 0.38, 0.30); g.add(talisJaw);
+  const shHornL  = mesh(box(0.08, 0.20, 0.08), M.orcTusk); shHornL.position.set( 0.50, 1.00, 0); shHornL.rotation.z =  0.35; g.add(shHornL);
+  const shHornR  = mesh(box(0.08, 0.20, 0.08), M.orcTusk); shHornR.position.set(-0.50, 1.00, 0); shHornR.rotation.z = -0.35; g.add(shHornR);
   _pushEnemy(g, 'orcMage', legL, legR, body, head, 2.1, chosenPath, armL, armR);
   orcs[orcs.length - 1].staffOrb = staffOrb;
 }
@@ -3874,6 +4676,10 @@ function spawnRockTroll(chosenPath) {
   // Stone teeth
   [[0.12,1.30,0.36],[0,1.28,0.38],[-0.12,1.30,0.36]].forEach(([px,py,pz]) => {
     const t = mesh(box(0.08, 0.18, 0.08), M.catMetal); t.position.set(px, py, pz); g.add(t);
+  });
+  // Molten crystal growths bursting from the stone — reads as a glowing-core golem (additive)
+  [[0.66,1.26,0.12,0.13],[-0.62,1.16,0.14,0.11],[0.16,1.02,0.34,0.11],[-0.22,0.84,0.32,0.09],[0.40,0.66,0.30,0.08]].forEach(([cx,cy,cz,cs]) => {
+    const shard = mesh(box(cs, cs*1.7, cs), M.rockTrollEye); shard.position.set(cx, cy, cz); shard.rotation.z = cx * 0.35; shard.rotation.x = -0.2; g.add(shard);
   });
   _pushEnemy(g, 'rockTroll', legL, legR, body, head, 2.3, chosenPath, armL, armR);
 }
@@ -4003,7 +4809,6 @@ function returnToPath(o) {
   o.pathIndex = bestIdx;
   o.progress  = 0;
   o.chasingDefender = null; // clear stale chase so enemy doesn't resume old pursuit
-  o._lungeBase = null;
   o.group.rotation.x = 0;
   o.group.rotation.y = 0;
   o.group.rotation.z = 0;
@@ -5043,6 +5848,18 @@ const SND = (() => {
       [0,55,115,180].forEach((ms, i) =>
         setTimeout(() => osc(1760 + i * 220,'sine',0.05,0.045 - i*0.005,2640 + i*180), ms));
     },
+    // Merchant arrives — mysterious two-tone shop bell with a soft shimmer
+    merchantOpen() {
+      [[0,659],[140,880],[300,1175]].forEach(([ms,f]) =>
+        setTimeout(() => osc(f,'triangle',0.22,0.10,f*1.02), ms));
+      setTimeout(() => noise(0.14,0.03,2600,'highpass'), 90);
+    },
+    // Merchant purchase — coin clink + confirming rising blip
+    merchantBuy() {
+      osc(1760,'sine',0.05,0.05,2640); osc(2640,'sine',0.035,0.035,3520);
+      setTimeout(() => osc(880,'triangle',0.14,0.09,1175), 70);
+      setTimeout(() => osc(1175,'triangle',0.16,0.08,1568), 170);
+    },
     // Level victory fanfare — full triumphant phrase (richer than waveComplete)
     levelVictory() {
       [[0,523],[140,659],[280,784],[420,1047],[640,1319]].forEach(([ms,f]) =>
@@ -5215,10 +6032,54 @@ function tickRangedEnemy(o, dt) {
   }
 }
 
+// ── Melee lunge offset ───────────────────────────────────────────────────────
+// Attack animations nudge an enemy a little way toward whatever it is hitting.
+// That nudge used to be baked into `group.position` as an ABSOLUTE write
+// (`position = _lungeBase + dir * amount`), with `_lungeBase` captured once when a
+// swing started and cleared only when the swing finished. `swingPhase` is advanced
+// *only* inside the stand-still-and-attack branch, so an enemy whose target stepped
+// away froze mid-swing, kept its stale `_lungeBase`, and then moved under the
+// slot-navigation / chase / path branches. The first frame it was back inside its
+// attack slot, the absolute write teleported it all the way back to where the swing
+// had begun (measured up to 4.5 tiles); it then walked out and snapped back again,
+// over and over. That sawtooth is the abrupt forward/backward enemy movement
+// players reported. On a smaller scale the same write let the 0.2-tile lunge push
+// the unit outside the 0.15-tile attack-slot tolerance, so slot navigation dragged
+// it back every other frame — a constant shimmy — and it also undid the
+// `pushFromBuildings` correction that runs right after it.
+//
+// The animation is now a pure per-frame render offset: `lungeReset` removes it at
+// the top of every simulation step and the attack branch re-applies it at the end.
+// It can therefore never be baked into the simulated position, never survive as a
+// stale anchor, and never fight another controller for the same value.
+function lungeReset(o) {
+  const l = o._lungeOff;
+  if (!l) return;
+  o.group.position.x -= l.x;
+  o.group.position.z -= l.z;
+  o._lungeOff = null;
+}
+function applyLunge(o, target, amount) {
+  if (!target || !amount) return;
+  const tp = target.group.position;
+  const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
+  const d  = Math.sqrt(dx * dx + dz * dz) || 1;
+  const ox = (dx / d) * amount, oz = (dz / d) * amount;
+  o.group.position.x += ox;
+  o.group.position.z += oz;
+  o._lungeOff = { x: ox, z: oz };
+}
+
 // ─────────────────────────────────────────────
 //  UPDATE ORCS
 // ─────────────────────────────────────────────
+// Simulation-step counter. The lane-rejoin block uses it to tell "I was walking the
+// lane last step" from "I was in a combat branch last step" without every branch
+// having to remember to reset the rejoin state. Incremented once per updateOrcs call
+// (i.e. once per substep), which is exactly once per orc per step.
+let _orcTickSeq = 0;
 function updateOrcs(dt, t) {
+  _orcTickSeq++;
   for (let i = orcs.length - 1; i >= 0; i--) {
     const o = orcs[i];
     if (!o.alive) {
@@ -5245,6 +6106,11 @@ function updateOrcs(dt, t) {
       }
       continue;
     }
+
+    // Strip last step's attack-animation offset before any logic reads or writes the
+    // position, so the simulation always works on the unit's true stance (see
+    // lungeReset above). Dying enemies keep theirs — they topple mid-swing.
+    lungeReset(o);
 
     // ── Attacking castle (spread across gate, same logic as wall spread) ──
     if (o.attackingCastle) {
@@ -5517,18 +6383,7 @@ function updateOrcs(dt, t) {
               if (o.legR) o.legR.rotation.x = -bs * 0.30;
             }
             // Lunge forward into the wall during the strike
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = bs * 0.20;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, bs * 0.20);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -5555,7 +6410,6 @@ function updateOrcs(dt, t) {
               if (o.legL) o.legL.rotation.x = 0;
               if (o.legR) o.legR.rotation.x = 0;
             }
-            o._lungeBase = null;
             o._swingRest = (o._swingRest || 0) + dt;
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
           }
@@ -5574,18 +6428,7 @@ function updateOrcs(dt, t) {
             if (bHead) { bHead.position.z = sb * 0.30; bHead.position.y = 1.07 - sb * 0.05; bHead.rotation.x = sb * 0.45; }
             if (bJaw)  { bJaw.rotation.x = 0.12 + sb * 0.65; } // jaw snaps wide open
             o.group.rotation.x = sb * 0.38; // whole body surges forward
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sb * 0.22;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sb * 0.22);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -5595,7 +6438,7 @@ function updateOrcs(dt, t) {
           } else {
             if (bHead) { bHead.position.z = 0; bHead.position.y = 1.07; bHead.rotation.x = 0; }
             if (bJaw)  { bJaw.rotation.x = 0.12; }
-            o.group.rotation.x = 0; o._lungeBase = null;
+            o.group.rotation.x = 0;
           }
         } else if (o.type === 'grunt') {
           // ── GRUNT wall attack: body-forward smash ──
@@ -5610,18 +6453,7 @@ function updateOrcs(dt, t) {
             if (o.armR) { o.armR.rotation.x = -1.6 + sw * 3.2; o.armR.rotation.z = -0.15 + sw * 0.20; }
             if (o.armL) { o.armL.rotation.x = -0.20 - sw * 0.3; o.armL.rotation.z = 0.28; }
             o.group.rotation.x = sw * 0.36;
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sw * 0.18;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sw * 0.18);
             if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
               o.swingHit = true; o.swingDamageReady = false;
               SND.wallHit();
@@ -5634,7 +6466,7 @@ function updateOrcs(dt, t) {
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
             if (o.armR) { o.armR.rotation.x = -1.6; o.armR.rotation.z = -0.15; }
             if (o.armL) { o.armL.rotation.x = -0.20; o.armL.rotation.z = 0.28; }
-            o.group.rotation.x = 0.08; o._lungeBase = null;
+            o.group.rotation.x = 0.08;
           }
         } else {
           // Planted stance — only weapon arm swings, no body bob or leg stride
@@ -5665,18 +6497,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -2.0 + tsw * 3.7; o.armL.rotation.z =  0.08; }
               o.group.rotation.x = tsw * 0.42;                    // body heaves forward with slam
               o.group.position.y = -tsw * 0.08;                   // knees buckle at impact
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = tsw * 0.12;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, tsw * 0.12);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -5690,7 +6511,6 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -2.0; o.armL.rotation.z =  0.08; }
               o.group.rotation.x = 0;          // clear forward heave residual
               o.group.position.y = 0;          // settle from knee buckle
-              o._lungeBase = null;
             }
           } else if (o.type === 'boss') {
             // ── BOSS: dominant overhead chop with torso rotation into the strike
@@ -5703,18 +6523,7 @@ function updateOrcs(dt, t) {
               o.group.rotation.z = 0;                              // no sideways tilt — boss is square to wall
               // Torso winds back then into strike (line 5045 above resets rotation.y to face wall each frame)
               o.group.rotation.y += (bsw - 0.5) * 0.10;
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = bsw * 0.18;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, bsw * 0.18);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -5726,7 +6535,6 @@ function updateOrcs(dt, t) {
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (o.armR) { o.armR.rotation.x = -1.7; o.armR.rotation.z = -0.28; }
               if (o.armL) { o.armL.rotation.x =  0.35; o.armL.rotation.z =  0.18; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'brute') {
             // ── BRUTE: hook swing — shoulder drives into the wall, club arcs sideways
@@ -5737,18 +6545,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x =  0.30 - bsw * 0.30; o.armL.rotation.z =  0.28; }
               o.group.rotation.x = bsw * 0.24;
               o.group.rotation.z = -bsw * 0.08;                   // gentle shoulder lead, not heavy roll
-              if (!o._lungeBase && o.blockedByWall) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.blockedByWall.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = bsw * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.blockedByWall, bsw * 0.22);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.blockedByWall?.alive) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.wallHit();
@@ -5760,7 +6557,6 @@ function updateOrcs(dt, t) {
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (o.armR) { o.armR.rotation.x = -0.6; o.armR.rotation.z = -0.45; }
               if (o.armL) { o.armL.rotation.x =  0.30; o.armL.rotation.z =  0.28; }
-              o._lungeBase = null;
             }
           } else if ((o.swingPhase || 0) > 0) {
             o.swingPhase = Math.max(0, o.swingPhase - dt * 1);
@@ -5774,25 +6570,13 @@ function updateOrcs(dt, t) {
               dealDefenderDamage(o.blockedByWall, CFG.ORC_TYPES[o.type].wallDmg || 1);
               if (o.blockedByWall) spawnHitParticles(posAbove(o.blockedByWall.group.position, 1.2), 0xaaaaaa);
             }
-            if (!o._lungeBase && o.blockedByWall) {
-              o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-              const tp = o.blockedByWall.group.position;
-              const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-              const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-              o._lungeDir = { x: dx / d2, z: dz / d2 };
-            }
-            if (o._lungeBase) {
-              const lunge = sw2 * 0.14;
-              o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-              o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-            }
+            applyLunge(o, o.blockedByWall, sw2 * 0.14);
           } else {
             o._swingRest = (o._swingRest || 0) + dt;
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
             if (o.armR) { o.armR.rotation.x = -1.4; o.armR.rotation.z = -0.20; }
             if (o.armL) { o.armL.rotation.x =  0.35; o.armL.rotation.z =  0.18; }
             o.group.rotation.x = 0;
-            o._lungeBase = null;
           }
         }
         // Navigate to pre-assigned spread position across the wall face
@@ -5912,21 +6696,10 @@ function updateOrcs(dt, t) {
                 if (o.fightingDefender?.alive) { const cp = o.group.position.clone().lerp(o.fightingDefender.group.position, 0.5); cp.y += 0.6; spawnHitParticles(cp, 0xff6600); spawnImpactRing(cp, 0xff8844); }
               }
               o.group.rotation.x = -0.14 + ss * 0.44;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * ss * 0.18;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * ss * 0.18;
-              }
+              applyLunge(o, o.fightingDefender, ss * 0.18);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'wolf') {
             // Low combat crouch — slow aggressive bob + bite lunge
@@ -5947,21 +6720,10 @@ function updateOrcs(dt, t) {
                 if (o.fightingDefender?.alive) { const cp = o.group.position.clone().lerp(o.fightingDefender.group.position, 0.5); cp.y += 0.7; spawnHitParticles(cp, 0xff6600); spawnImpactRing(cp, 0xff8844); }
               }
               o.group.rotation.x = -0.10 + ws * 0.52;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * ws * 0.22;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * ws * 0.22;
-              }
+              applyLunge(o, o.fightingDefender, ws * 0.22);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-              o._lungeBase = null;
             }
           } else if (o.type === 'cyclops') {
             const cca = Math.sin(o.animTime);
@@ -6008,24 +6770,13 @@ function updateOrcs(dt, t) {
               if (bHead) { bHead.position.z = sb * 0.30; bHead.position.y = 1.07 - sb * 0.05; bHead.rotation.x = sb * 0.45; }
               if (bJaw)  { bJaw.rotation.x = 0.12 + sb * 0.65; }
               o.group.rotation.x = sb * 0.38;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sb * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sb * 0.22);
             } else {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (bHead) { bHead.position.z = 0; bHead.position.y = 1.07; bHead.rotation.x = 0; }
               if (bJaw)  { bJaw.rotation.x = 0.12; }
-              o.group.rotation.x = 0; o._lungeBase = null;
+              o.group.rotation.x = 0;
             }
           } else if (o.type === 'brute') {
             // ── BRUTE: club-hook swing — shoulder drives forward, club arcs in sideways ──
@@ -6037,18 +6788,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = 0.30 - sw * 0.35; o.armL.rotation.z = 0.28; }
               o.group.rotation.x = sw * 0.26;
               o.group.rotation.z = -sw * 0.09;                 // gentle shoulder lead, not an off-axis roll
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.22;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.22);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.fightingDefender?.alive && weaponInRange(o, o.fightingDefender, 0.75)) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.sword(); dealDefenderDamage(o.fightingDefender, CFG.ORC_TYPES[o.type].defDmg || 1, o);
@@ -6060,7 +6800,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -0.6; o.armR.rotation.z = -0.45; }
               if (o.armL) { o.armL.rotation.x = 0.30; o.armL.rotation.z = 0.28; }
               o.group.rotation.x = 0; o.group.rotation.z = 0;
-              o._lungeBase = null;
             }
           } else if (o.type === 'grunt') {
             // ── GRUNT: aggressive shoulder-charge lunge ──
@@ -6072,18 +6811,7 @@ function updateOrcs(dt, t) {
               if (o.armL) { o.armL.rotation.x = -0.20 - sw * 0.4; o.armL.rotation.z = 0.30; }
               o.group.rotation.x = 0.10 + sw * 0.38;
               o.group.rotation.z = sw * 0.06;                  // subtle hip lead, no big sideways tilt
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.20;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.20);
               if (!o.swingHit && o.swingPhase <= 0.5 && o.swingDamageReady && o.fightingDefender?.alive && weaponInRange(o, o.fightingDefender, 0.65)) {
                 o.swingHit = true; o.swingDamageReady = false;
                 SND.sword();
@@ -6098,7 +6826,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.6; o.armR.rotation.z = -0.15; }
               if (o.armL) { o.armL.rotation.x = -0.20; o.armL.rotation.z = 0.30; }
               o.group.rotation.x = 0.08; o.group.rotation.z = 0;
-              o._lungeBase = null;
             }
           } else {
             // Planted stance — feet still, body upright, only weapon arm swings
@@ -6125,7 +6852,6 @@ function updateOrcs(dt, t) {
               } else {
                 o._swingRest = (o._swingRest || 0) + dt;
                 if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
-                o._lungeBase = null;
               }
             } else if ((o.swingPhase || 0) > 0) {
               // Speed proportional to defRate so fast attackers (grunt 0.9/s) swing quickly
@@ -6148,18 +6874,7 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.4 + sw * 2.8; o.armR.rotation.z = -0.20 + sw * 0.30; }
               if (o.armL) { o.armL.rotation.x =  0.40 - sw * 0.4; o.armL.rotation.z = 0.22; }
               o.group.rotation.x = sw * 0.28;
-              if (!o._lungeBase && o.fightingDefender) {
-                o._lungeBase = { x: o.group.position.x, z: o.group.position.z };
-                const tp = o.fightingDefender.group.position;
-                const dx = tp.x - o.group.position.x, dz = tp.z - o.group.position.z;
-                const d2 = Math.sqrt(dx * dx + dz * dz) || 1;
-                o._lungeDir = { x: dx / d2, z: dz / d2 };
-              }
-              if (o._lungeBase) {
-                const lunge = sw * 0.16;
-                o.group.position.x = o._lungeBase.x + o._lungeDir.x * lunge;
-                o.group.position.z = o._lungeBase.z + o._lungeDir.z * lunge;
-              }
+              applyLunge(o, o.fightingDefender, sw * 0.16);
             } else {
               // Hold weapon-raised pose between swings; only restart animation once defAttackTimer
               // is about to fire so we don't spin through empty swings between damage ticks.
@@ -6169,7 +6884,6 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.4; o.armR.rotation.z = -0.20; }
               if (o.armL) { o.armL.rotation.x =  0.40; o.armL.rotation.z =  0.22; }
               o.group.rotation.x = 0;
-              o._lungeBase = null;
             }
           }
           pushFromBuildings(o.group.position, 0.28 + 0.12 * o.scale, o.fightingDefender);
@@ -6294,6 +7008,11 @@ function updateOrcs(dt, t) {
     const SEP_STOP = 0.5, SEP_SLOW = 1.0;
     const SEP_SLOW_SQ = SEP_SLOW * SEP_SLOW;
     let speedFactor = 1.0;
+    // Crowd-control-only multiplier: the slow/phase debuffs without the separation
+    // term below. The lane-rejoin walk-back needs this — separation ("don't walk into
+    // the unit ahead") can drive speedFactor to exactly 0, which must not freeze an
+    // enemy that is only moving sideways back onto its lane.
+    let ccFactor = 1.0;
     const _skipSep = orcs.length > 80;
     if (!_skipSep) for (const other of orcs) {
       if (other === o || !other.alive || other.path !== o.path) continue;
@@ -6316,6 +7035,7 @@ function updateOrcs(dt, t) {
     // ── CC: slow debuff (applied by mage orb hits and spike traps) ──
     if (o.slowTimer > 0) {
       speedFactor *= o.slowAmount;
+      ccFactor    *= o.slowAmount;
       o.slowTimer -= dt;
       if (o.slowTimer < 0) { o.slowTimer = 0; o.slowAmount = 1.0; }
     }
@@ -6346,77 +7066,136 @@ function updateOrcs(dt, t) {
     }
 
     // ── Skeleton wall-phase slowdown ──
-    if (o._phaseTimer > 0) { o._phaseTimer -= dt; speedFactor *= 0.35; }
+    if (o._phaseTimer > 0) { o._phaseTimer -= dt; speedFactor *= 0.35; ccFactor *= 0.35; }
+
+    // ── Rejoin the lane on foot instead of teleporting ──
+    // pathIndex/progress describe where the enemy left the lane; its world position
+    // does not. Anything that took it off the lane (chasing a tower, fanning out
+    // across a wall face, being shoved by the crossing-push) therefore used to be
+    // undone in a single frame by the hard `position = interpolate(path)` assignment
+    // below — a snap of up to ~5 tiles backwards. It would then walk off again and
+    // snap back again, which is the abrupt forward/backward motion players reported.
+    // Walk back at the unit's own speed and hold forward progress until it is on the
+    // lane, so nothing teleports and no unit moves faster than its own stat.
+    let _rejoining = false;
+    {
+      // A new off-lane episode begins on the first step after the enemy leaves a combat
+      // branch (those `continue` before this block, so the counter below goes stale).
+      // Give it a fresh safety-valve budget: `_rejoinT` used to be a lifetime counter
+      // that cleared only once the enemy was back on the lane, so an enemy that drifted
+      // off-lane, fought for a while, then needed a genuine walk-back arrived with the
+      // budget already spent and got teleported on its first frame — the exact snap this
+      // block exists to prevent (measured 2.62 s of stale budget carried into combat).
+      if (o._rejoinSeq !== _orcTickSeq - 1) { o._rejoinT = 0; o._rejoinBest = Infinity; }
+      o._rejoinSeq = _orcTickSeq;
+      const rc = o.path[o.pathIndex];
+      const rn = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
+      const rx = rc[0] + (rn[0] - rc[0]) * o.progress;
+      const rz = rc[1] + (rn[1] - rc[1]) * o.progress;
+      const rdx = rx - o.group.position.x, rdz = rz - o.group.position.z;
+      const rd  = Math.sqrt(rdx * rdx + rdz * rdz);
+      // Only engages when genuinely off-lane: normal path walking keeps rd at ~0.
+      if (rd > Math.max(speedFactor * o.speed * dt, 0.05)) {
+        // Safety valve: if anything ever stopped an enemy converging it would stall the
+        // wave, so fall back to the old snap after a couple of seconds. Only time spent
+        // FAILING to get closer counts — a long but healthy walk-back (a slowed enemy
+        // returning from a 6-tile chase takes well over 2.5 s) must not be punished.
+        // `_rejoinBest` only ever moves down within an episode, so an enemy that truly
+        // cannot converge still trips the valve and can never stall the wave.
+        if (rd < (o._rejoinBest ?? Infinity) - 0.05) { o._rejoinBest = rd; o._rejoinT = 0; }
+        else o._rejoinT = (o._rejoinT || 0) + dt;
+        if (o._rejoinT < 2.5) {
+          _rejoining = true;
+          // Honour crowd control: this used to step at the enemy's *base* speed, so a
+          // slowed (mage orb / spike trap) or wall-phasing enemy ignored the debuff
+          // entirely for as long as it was rejoining. `ccFactor` deliberately excludes
+          // the separation term of `speedFactor` — that one is "don't walk into the
+          // unit ahead", which must not apply to sideways movement back onto the lane
+          // (it can be exactly 0, which would make convergence impossible).
+          const rstep = Math.min(ccFactor * o.speed * dt, rd);
+          o.group.position.x += (rdx / rd) * rstep;
+          o.group.position.z += (rdz / rd) * rstep;
+          o.group.rotation.y = Math.atan2(rdx, rdz);
+          o.group.rotation.x = 0;
+          o.group.rotation.z = 0;
+        }
+      } else {
+        o._rejoinT = 0;
+        o._rejoinBest = Infinity;
+      }
+    }
 
     // ── Movement along path ──
-    o.progress += speedFactor * o.speed * dt;
-    while (o.progress >= 1) {
-      const nextIdx = o.pathIndex + 1;
-      if (nextIdx >= o.path.length) {
-        o.attackingCastle = true;
-        o.castleAttackTimer = 0;
-        o.progress = 0;
-        // Assign lateral spread slot — same pattern as wall spread
-        const takenCS = new Set();
-        for (const other of orcs) {
-          if (other !== o && other.alive && other.attackingCastle && other.castleSlotIdx >= 0)
-            takenCS.add(other.castleSlotIdx);
-        }
-        let csi = 0; while (takenCS.has(csi)) csi++;
-        o.castleSlotIdx = csi;
-        const cgate = o.path[o.path.length - 1];
-        const latSign = csi === 0 ? 0 : (csi % 2 === 1 ? 1 : -1);
-        const latMag  = Math.ceil(csi / 2) * 0.85;
-        o.castleTargetZ = cgate[1] + latSign * latMag;
-        break;
-      }
-      // Check if next tile has a blocking wall
-      const [nc, nr] = o.path[nextIdx];
-      const wall = getWallAtPath(nc, nr);
-      if (wall) {
-        if (o.type === 'skeleton') {
-          // Skeletons phase through walls — they're just bones, they squeeze through the gaps
-          // Slowed to 35% speed for 1.8 s while passing through
-          o._phaseTimer = 1.8;
-          spawnHitParticles(posAbove(o.group.position, 0.6), 0x88aaff);
-          SND.skeletonPhase();
-          // Do NOT break — let normal advance happen below
-        } else {
-          o.blockedByWall = wall;
-          o.wallAttackTimer = 0;
-          // Stop far enough that the enemy's scaled body doesn't penetrate the wall mesh (±0.45 half-extent)
-          o.progress = Math.max(0.05, 1 - 0.48 - 0.22 * o.scale);
-          // Assign a unique lateral spread slot so enemies fan across the wall face
-          const takenWS = new Set();
+    if (!_rejoining) {
+      o.progress += speedFactor * o.speed * dt;
+      while (o.progress >= 1) {
+        const nextIdx = o.pathIndex + 1;
+        if (nextIdx >= o.path.length) {
+          o.attackingCastle = true;
+          o.castleAttackTimer = 0;
+          o.progress = 0;
+          // Assign lateral spread slot — same pattern as wall spread
+          const takenCS = new Set();
           for (const other of orcs) {
-            if (other !== o && other.alive && other.blockedByWall === wall && other.wallSlotIdx >= 0)
-              takenWS.add(other.wallSlotIdx);
+            if (other !== o && other.alive && other.attackingCastle && other.castleSlotIdx >= 0)
+              takenCS.add(other.castleSlotIdx);
           }
-          let wsi = 0; while (takenWS.has(wsi)) wsi++;
-          o.wallSlotIdx = wsi;
-          // Perpendicular direction to path at this tile
-          const [cc, cr] = o.path[o.pathIndex];
-          const perpX = -(nr - cr), perpZ = nc - cc;
-          const latSign = wsi === 0 ? 0 : (wsi % 2 === 1 ? 1 : -1);
-          const latMag  = Math.ceil(wsi / 2) * 0.85;
-          o.wallTargetX = cc + (nc - cc) * o.progress + perpX * latSign * latMag;
-          o.wallTargetZ = cr + (nr - cr) * o.progress + perpZ * latSign * latMag;
+          let csi = 0; while (takenCS.has(csi)) csi++;
+          o.castleSlotIdx = csi;
+          const cgate = o.path[o.path.length - 1];
+          const latSign = csi === 0 ? 0 : (csi % 2 === 1 ? 1 : -1);
+          const latMag  = Math.ceil(csi / 2) * 0.85;
+          o.castleTargetZ = cgate[1] + latSign * latMag;
           break;
         }
+        // Check if next tile has a blocking wall
+        const [nc, nr] = o.path[nextIdx];
+        const wall = getWallAtPath(nc, nr);
+        if (wall) {
+          if (o.type === 'skeleton') {
+            // Skeletons phase through walls — they're just bones, they squeeze through the gaps
+            // Slowed to 35% speed for 1.8 s while passing through
+            o._phaseTimer = 1.8;
+            spawnHitParticles(posAbove(o.group.position, 0.6), 0x88aaff);
+            SND.skeletonPhase();
+            // Do NOT break — let normal advance happen below
+          } else {
+            o.blockedByWall = wall;
+            o.wallAttackTimer = 0;
+            // Stop far enough that the enemy's scaled body doesn't penetrate the wall mesh (±0.45 half-extent)
+            o.progress = Math.max(0.05, 1 - 0.48 - 0.22 * o.scale);
+            // Assign a unique lateral spread slot so enemies fan across the wall face
+            const takenWS = new Set();
+            for (const other of orcs) {
+              if (other !== o && other.alive && other.blockedByWall === wall && other.wallSlotIdx >= 0)
+                takenWS.add(other.wallSlotIdx);
+            }
+            let wsi = 0; while (takenWS.has(wsi)) wsi++;
+            o.wallSlotIdx = wsi;
+            // Perpendicular direction to path at this tile
+            const [cc, cr] = o.path[o.pathIndex];
+            const perpX = -(nr - cr), perpZ = nc - cc;
+            const latSign = wsi === 0 ? 0 : (wsi % 2 === 1 ? 1 : -1);
+            const latMag  = Math.ceil(wsi / 2) * 0.85;
+            o.wallTargetX = cc + (nc - cc) * o.progress + perpX * latSign * latMag;
+            o.wallTargetZ = cr + (nr - cr) * o.progress + perpZ * latSign * latMag;
+            break;
+          }
+        }
+        o.progress -= 1;
+        o.pathIndex = nextIdx;
       }
-      o.progress -= 1;
-      o.pathIndex = nextIdx;
-    }
-    if (!o.alive || o.attackingCastle) continue;
+      if (!o.alive || o.attackingCastle) continue;
 
-    // ── Position interpolation ──
-    const cur = o.path[o.pathIndex];
-    const nxt = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
-    o.group.position.x = cur[0] + (nxt[0] - cur[0]) * o.progress;
-    o.group.position.z = cur[1] + (nxt[1] - cur[1]) * o.progress;
+      // ── Position interpolation ──
+      const cur = o.path[o.pathIndex];
+      const nxt = o.path[Math.min(o.pathIndex + 1, o.path.length - 1)];
+      o.group.position.x = cur[0] + (nxt[0] - cur[0]) * o.progress;
+      o.group.position.z = cur[1] + (nxt[1] - cur[1]) * o.progress;
 
-    const dx = nxt[0] - cur[0], dz = nxt[1] - cur[1];
-    if (dx !== 0 || dz !== 0) o.group.rotation.y = Math.atan2(dx, dz);
+      const dx = nxt[0] - cur[0], dz = nxt[1] - cur[1];
+      if (dx !== 0 || dz !== 0) o.group.rotation.y = Math.atan2(dx, dz);
+    } // end !_rejoining
 
     // ── Soft push from enemies on other paths (prevents visual overlap at crossings) ──
     const crossMinD = 0.45 + 0.2 * o.scale;
@@ -6937,6 +7716,13 @@ function buildWall(col, row) {
   // Iron ring decoration on front face
   const ring = mesh(box(0.14, 0.14, 0.06), M.catMetal); ring.position.set(0, 0.62, 0.47); g.add(ring);
   const crossH = mesh(box(0.14, 0.03, 0.06), M.catMetal); crossH.position.set(0, 0.62, 0.47); g.add(crossH);
+  // Hanging heraldic banner on the front face — flies the Azure & Gold Order colours (additive)
+  const bnRod   = mesh(box(0.44, 0.05, 0.05), M.castleFlagPole); bnRod.position.set(0, 1.66, 0.50); g.add(bnRod);
+  const bnCloth = mesh(box(0.34, 0.70, 0.04), M.castleFlag);     bnCloth.position.set(0, 1.28, 0.50); g.add(bnCloth);
+  const bnTrim  = mesh(box(0.36, 0.05, 0.05), M.swGold);         bnTrim.position.set(0, 0.94, 0.505); g.add(bnTrim);
+  const bnEmblem= mesh(box(0.14, 0.16, 0.05), M.swGold);         bnEmblem.position.set(0, 1.30, 0.515); g.add(bnEmblem);
+  const bnPointL= mesh(box(0.17, 0.12, 0.04), M.castleFlag);     bnPointL.position.set(-0.085, 0.86, 0.50); g.add(bnPointL); // swallow-tail
+  const bnPointR= mesh(box(0.17, 0.12, 0.04), M.castleFlag);     bnPointR.position.set( 0.085, 0.86, 0.50); g.add(bnPointR);
   const hpBar = makeHPBar(g, 2.88);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -6992,6 +7778,11 @@ function buildTower(col, row) {
   const mount = mesh(box(0.26, 0.22, 0.26), M.castleStone); mount.position.y = 2.78; g.add(mount);
   [[0.28,0.06,0],[0,0.06,0.28],[-0.28,0.06,0],[0,0.06,-0.28]].forEach(([ax,ah,az]) => {
     const arm2 = mesh(box(Math.abs(ax)||0.06, ah, Math.abs(az)||0.06), M.castleStone); arm2.position.set(ax*0.5, 2.9, az*0.5); g.add(arm2);
+  });
+  // Arcane rune studs ringing the crystal mount — glowing sigils that tie the
+  // stone tower to its crystal focus (additive; reuse the crystal glow material)
+  [[0.24,0],[0,0.24],[-0.24,0],[0,-0.24]].forEach(([rx,rz]) => {
+    const rune = mesh(box(0.06, 0.06, 0.06), M.crystal); rune.position.set(rx, 2.80, rz); g.add(rune);
   });
   // Crystal — 3-part stack (base, body, tip) with glow ring at base
   const xtalBase = mesh(box(0.26, 0.18, 0.26), M.crystal); xtalBase.position.y = 3.0; g.add(xtalBase);
@@ -7092,6 +7883,14 @@ function buildCatapult(col, row) {
     const boulderSz = 0.12 + Math.abs(bx+bz) * 0.05;
     const boulder = mesh(box(boulderSz, boulderSz*0.85, boulderSz*0.9), M.rockMat); boulder.position.set(bx, by, bz); g.add(boulder);
   });
+  // Faction colours — a corner pennant mast + a gold-bossed shield hung on the
+  // chassis flank, matching the Azure & Gold treatment of the other defenders (additive)
+  const cpMast   = mesh(box(0.05, 0.80, 0.05), M.castleFlagPole); cpMast.position.set(-0.36, 0.62, 0.30); g.add(cpMast);
+  const cpFinial = mesh(box(0.07, 0.07, 0.07), M.swGold);         cpFinial.position.set(-0.36, 1.05, 0.30); g.add(cpFinial);
+  const cpFlag   = mesh(box(0.04, 0.22, 0.26), M.castleFlag);     cpFlag.position.set(-0.34, 0.90, 0.45); g.add(cpFlag);
+  const cpTrim   = mesh(box(0.045, 0.04, 0.28), M.swGold);        cpTrim.position.set(-0.34, 1.02, 0.45); g.add(cpTrim);
+  const cpShield = mesh(box(0.06, 0.30, 0.24), M.swShield);       cpShield.position.set(-0.46, 0.30, -0.10); g.add(cpShield);
+  const cpBoss   = mesh(box(0.07, 0.10, 0.10), M.swGold);         cpBoss.position.set(-0.48, 0.30, -0.10); g.add(cpBoss);
   const catHpBar = makeHPBar(g, 2.1);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7158,6 +7957,12 @@ function buildMage(col, row) {
   const hat4    = mesh(box(0.06, 0.14, 0.06), M.mageOrb);  hat4.position.y = 2.13; g.add(hat4); // glowing tip
   // Hat band — gold trim around brim base (mystic stripe)
   const hatBand = mesh(box(0.38, 0.04, 0.38), M.mageOrb);  hatBand.position.y = 1.45; g.add(hatBand);
+  // Orbiting spell-tome — a small floating grimoire wreathed in arcane light,
+  // hovering at the mage's left side (additive; animated in updateDefenders)
+  const tome = new THREE.Group(); tome.position.set(0.62, 1.05, 0.10); g.add(tome);
+  const tomeCover = mesh(box(0.06, 0.24, 0.20), M.mageRobe); tome.add(tomeCover);
+  const tomePages = mesh(box(0.08, 0.20, 0.16), M.skelBone); tome.add(tomePages);
+  const tomeRune  = mesh(box(0.09, 0.09, 0.03), M.mageOrb);  tomeRune.position.set(0.05, 0, 0); tome.add(tomeRune);
   const mageHpBar = makeHPBar(g, 2.45);
   g.position.set(col, 0, row); g.rotation.y = -Math.PI / 2; g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7220,6 +8025,12 @@ function buildBallista(col, row) {
     const leg = mesh(box(0.08, 0.28, 0.08), M.ballistaWood); leg.position.set(lx, ly, lz); g.add(leg);
     const sock = mesh(box(0.10, 0.05, 0.10), M.catMetal);    sock.position.set(lx, 0.10, lz); g.add(sock);
   });
+  // Side rack of spare bolts — a quiver of ammunition lashed to the chassis (additive)
+  const rack = mesh(box(0.10, 0.12, 0.34), M.catWood); rack.position.set(0.40, 0.30, -0.10); g.add(rack);
+  for (let i = 0; i < 3; i++) {
+    const spare = mesh(box(0.035, 0.46, 0.035), M.catWood);  spare.position.set(0.40, 0.42, -0.20 + i * 0.09); g.add(spare);
+    const spTip = mesh(box(0.06, 0.09, 0.06), M.bBoltMat);   spTip.position.set(0.40, 0.66, -0.20 + i * 0.09); g.add(spTip);
+  }
   const balHpBar = makeHPBar(g, 1.30);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7258,6 +8069,17 @@ function buildSpikeTrap(col, row) {
     const s3 = mesh(box(0.04, 0.08, 0.04), M.spikeGlow);  s3.position.set(0, 0.37, 0); sg.add(s3); // glowing tip
     spikeGroups.push(sg);
   });
+  // Heavy corner rivets on the iron frame
+  [[0.42,0.42],[0.42,-0.42],[-0.42,0.42],[-0.42,-0.42]].forEach(([rx,rz]) => {
+    const rivet = mesh(box(0.12, 0.13, 0.12), M.catMetal); rivet.position.set(rx, 0.10, rz); g.add(rivet);
+  });
+  // Grim trophies — a cracked skull impaled at the edge + scattered bones (the trap bites)
+  const skull   = mesh(box(0.17, 0.16, 0.15), M.orcTusk);  skull.position.set(0.16, 0.30, 0.30); g.add(skull);
+  const skullJaw= mesh(box(0.14, 0.05, 0.11), M.orcTusk);  skullJaw.position.set(0.16, 0.24, 0.33); g.add(skullJaw);
+  const skEyeL  = mesh(box(0.04, 0.045,0.03), M.castleDark); skEyeL.position.set(0.20, 0.31, 0.37); g.add(skEyeL);
+  const skEyeR  = mesh(box(0.04, 0.045,0.03), M.castleDark); skEyeR.position.set(0.12, 0.31, 0.37); g.add(skEyeR);
+  const bone1   = mesh(box(0.05, 0.22, 0.05), M.orcTusk);  bone1.position.set(-0.30, 0.11, -0.22); bone1.rotation.z = 1.3; g.add(bone1);
+  const bone2   = mesh(box(0.05, 0.17, 0.05), M.orcTusk);  bone2.position.set(-0.24, 0.11, 0.26); bone2.rotation.z = 1.1; bone2.rotation.y = 0.5; g.add(bone2);
   const spikeHpBar = makeHPBar(g, 0.70);
   // hide HP bar since trap is indestructible
   spikeHpBar.bg.visible = false; spikeHpBar.fg.visible = false;
@@ -7336,6 +8158,15 @@ function buildSoldier(col, row, soldierType) {
     const swGuard  = mesh(box(0.40, 0.07, 0.08), M.weapon);   swGuard.position.set(0, -0.08, 0); swGuard.rotation.y = Math.PI / 2; swGroup.add(swGuard);
     const swBlade  = mesh(box(0.07, 0.52, 0.05), M.weapon);   swBlade.position.set(0,   0.20, 0); swBlade.rotation.y = Math.PI / 2; swGroup.add(swBlade);
     const swTip    = mesh(box(0.045, 0.14, 0.035), M.weapon); swTip.position.set(0,     0.50, 0); swGroup.add(swTip);
+    // ── Knight grandeur: flowing heraldic cape + crest plume (additive, rig-safe) ──
+    // Local -Z is the figure's back; cape hangs from a gold mantle at the shoulders.
+    const capeClasp = mesh(box(0.46, 0.09, 0.06), M.swGold); capeClasp.position.set(0, 0.93, -0.17); g.add(capeClasp);
+    const capeUp    = mesh(box(0.44, 0.42, 0.05), M.spCape); capeUp.position.set(0, 0.66, -0.205); g.add(capeUp);
+    const capeLo    = mesh(box(0.40, 0.26, 0.05), M.spCape); capeLo.position.set(0, 0.34, -0.235); capeLo.rotation.x = -0.05; g.add(capeLo);
+    const capeHem   = mesh(box(0.41, 0.05, 0.06), M.swGold); capeHem.position.set(0, 0.215, -0.245); g.add(capeHem);
+    // Tall horsehair crest plume sweeping back off the helm crest
+    const plume1 = mesh(box(0.09, 0.16, 0.14), M.spCape); plume1.position.set(0, 1.50, -0.10); plume1.rotation.x = -0.5; g.add(plume1);
+    const plume2 = mesh(box(0.08, 0.14, 0.12), M.spCape); plume2.position.set(0, 1.42, -0.22); plume2.rotation.x = -0.9; g.add(plume2);
 
   } else if (soldierType === 'swordsman') {
     // ── SWORDSMAN — royal blue tunic, brown leather accents ──
@@ -7389,6 +8220,10 @@ function buildSoldier(col, row, soldierType) {
     const swGrd   = mesh(box(0.28, 0.06, 0.07), M.weapon);  swGrd.position.set(0, -0.04, 0); swGrd.rotation.y = Math.PI / 2; swGrp.add(swGrd);
     const swBlade = mesh(box(0.06, 0.42, 0.04), M.weapon);  swBlade.position.set(0, 0.18, 0); swBlade.rotation.y = Math.PI / 2; swGrp.add(swBlade);
     const swTip   = mesh(box(0.04, 0.12, 0.03), M.weapon);  swTip.position.set(0, 0.44, 0); swGrp.add(swTip);
+    // ── Swordsman flair: dashing half-cloak slung from the right shoulder (rig-safe) ──
+    const hcClasp = mesh(box(0.16, 0.08, 0.24), M.swGold); hcClasp.position.set(-0.18, 0.92, -0.02); g.add(hcClasp);
+    const hcUp    = mesh(box(0.30, 0.40, 0.05), M.castleFlag); hcUp.position.set(-0.06, 0.66, -0.19); hcUp.rotation.z = 0.10; g.add(hcUp);
+    const hcLo    = mesh(box(0.26, 0.22, 0.05), M.castleFlag); hcLo.position.set(-0.04, 0.36, -0.21); hcLo.rotation.z = 0.06; g.add(hcLo);
 
   } else if (soldierType === 'spearman') {
     // ── SPEARMAN — slate blue cloth, metal plates, red cape ──
@@ -7487,6 +8322,11 @@ function buildSoldier(col, row, soldierType) {
     // Hood
     const hood = mesh(box(0.38, 0.4, 0.38), M.arcHood); hood.position.y = 1.12; g.add(hood);
     const face2 = mesh(box(0.26, 0.2, 0.08), M.skin); face2.position.set(0, 1.1, 0.2); g.add(face2);
+    // ── Ranger's hooded cloak flowing down the back (rig-safe, static) ──
+    const cloakNeck = mesh(box(0.40, 0.12, 0.06), M.arcHood); cloakNeck.position.set(0, 0.92, -0.16); g.add(cloakNeck);
+    const cloakUp   = mesh(box(0.40, 0.44, 0.05), M.arcHood); cloakUp.position.set(0, 0.64, -0.19); g.add(cloakUp);
+    const cloakLo   = mesh(box(0.34, 0.26, 0.05), M.arcHood); cloakLo.position.set(0, 0.34, -0.215); cloakLo.rotation.x = -0.05; g.add(cloakLo);
+    const cloakHem  = mesh(box(0.35, 0.05, 0.06), M.arcBelt); cloakHem.position.set(0, 0.205, -0.225); g.add(cloakHem);
   }
 
   const soldierHpBar = makeHPBar(g, 1.72);
@@ -7513,8 +8353,8 @@ function addUpgradeIndicator(def) {
   def.group.traverse(child => { if (child.userData.isUpgradeGem) toRemove.push(child); });
   toRemove.forEach(child => { def.group.remove(child); child.geometry.dispose(); });
   // Add gems based on level
-  const gemCount = def.level - 1; // level 2 = 1 gem, level 3 = 2 gems
-  const colors = [0xffd040, 0xff8820]; // yellow, orange
+  const gemCount = def.level - 1; // lv2 = 1 gem, lv3 = 2, lv4 = 3
+  const colors = [0xffd040, 0xff8820, 0x33e0ff]; // yellow, orange, elite prismatic-cyan
   for (let i = 0; i < gemCount; i++) {
     const gemGeo = box(0.11, 0.11, 0.11);
     const gemMat = new THREE.MeshStandardMaterial({ color: colors[i], emissive: colors[i], emissiveIntensity: 1.8 });
@@ -7557,22 +8397,25 @@ function tryUpgradeDefender(col, row) {
   if (def.type === 'spiketrap') { showTooltip('Spike traps cannot be upgraded!', 1800); return; }
   if (def.type === 'wall') { showTooltip('Walls cannot be upgraded!', 1800); return; }
   const level = def.level || 1;
-  if (level >= 3) {
+  if (level >= 4) {
     showTooltip('Max level!', 1500);
     return;
   }
-  const killsNeeded = level === 1 ? 10 : 25;
+  const killsNeeded = level === 1 ? 10 : level === 2 ? 25 : 50; // lv3→4 (elite) demands 50
   if ((def.kills || 0) < killsNeeded) {
     showTooltip(`Need ${killsNeeded} kills to upgrade! (${def.kills || 0}/${killsNeeded})`, 2000);
     return;
   }
   const isBuilding = ['tower', 'catapult', 'archer', 'mage', 'ballista'].includes(def.type);
-  const cost = CFG.COSTS[def.type] * level * (isBuilding ? 2 : 1);
+  let cost = CFG.COSTS[def.type] * level * (isBuilding ? 2 : 1);
+  if (level === 3) cost = Math.round(cost * 1.5); // level-4 elite premium
   if (gold < cost) {
     showTooltip(`Not enough gold! Need ${cost}🟡 to upgrade`, 2000);
     return;
   }
   gold -= cost;
+  _bumpStat('goldSpent', cost);
+  _bumpStat('upgradesDone', 1);
   def.level = level + 1;
   SND.upgrade();
   // Boost stats using per-type multipliers from CFG.UPGRADE_STATS
@@ -7643,7 +8486,8 @@ function place(tool, col, row) {
     showTooltip(`Not enough gold! Need ${cost}🟡`, 2000);
     return;
   }
-  if (!testMode) gold -= cost;
+  if (!testMode) { gold -= cost; _bumpStat('goldSpent', cost); }
+  if (!testMode) { _runStats.defendersBuilt++; _bumpStat('defendersBuilt', 1); }
   occupied.add(key);
 
   if      (tool === 'wall')      buildWall(col, row);
@@ -7967,10 +8811,12 @@ function dealDamage(orc, dmg, attacker = null) {
     _bumpStat('kills', 1);
     if (orc.isLevelBoss) {
       _unlockAchievement('bossKill');
+      _bumpStat('bossKills', 1);
       // Flawless: no defender deaths during this wave AND boss is now dead
       if (waveDefDeaths === 0) _unlockAchievement('flawlessBoss');
     }
     gold += orc.reward;
+    _runStats.goldEarned += orc.reward;
     SND.goldGain();  // throttled — coin tinkle on reward
     window._testOnEnemyKilled?.(orc);
     updateHUD();
@@ -8038,6 +8884,7 @@ function dealDamage(orc, dmg, attacker = null) {
     if (streakCount >= 5) {
       const bonus = 5 + streakCount;
       gold += bonus;
+      _runStats.goldEarned += bonus;
       spawnGoldPopup(bonus, posAbove(orc.group.position, 2.1));
       if (streakCount % 5 === 0) showTooltip(`🔥 ${streakCount} KILL STREAK! +${bonus}🟡`, 1500);
     }
@@ -9084,9 +9931,13 @@ function updateWebZones(dt) {
 // ─────────────────────────────────────────────
 //  WAVE SPAWNER — 12 designed waves + scaling
 // ─────────────────────────────────────────────
-function buildSpawnQueue(waveNum) {
-  const q = [];
-  const add = (type, n) => { for (let i = 0; i < n; i++) q.push(type); };
+// Pure base composition for a wave — ordered [type, count] pairs, no randomness,
+// no side effects. buildSpawnQueue() turns this into the actual spawn queue
+// (cluster-shuffle, elite rolls, pacing); the next-wave preview HUD reads it
+// directly so the player can see what's coming and build counters in advance.
+function waveComposition(waveNum) {
+  const comp = [];
+  const add = (type, n) => comp.push([type, n]);
 
   // Waves 1-12: hand-tuned progression
   // Early (1-4):  learn the basics, manageable with minimal defenses
@@ -9144,6 +9995,14 @@ function buildSpawnQueue(waveNum) {
     add('healerOrc',  2 + Math.ceil(n * 0.4));
     add('rockTroll',  1 + Math.ceil(n * 0.3));
   }
+  return comp;
+}
+
+function buildSpawnQueue(waveNum) {
+  const q = [];
+  for (const [type, n] of waveComposition(waveNum)) {
+    for (let i = 0; i < n; i++) q.push(type);
+  }
 
   // Cluster-shuffle: group into cohorts of 2–3 enemies (preserving add() order internally)
   // then shuffle the COHORTS. Result: small packs of same-type enemies arrive together
@@ -9191,6 +10050,37 @@ function buildSpawnQueue(waveNum) {
   return q;
 }
 
+// ── Endless wave modifiers ───────────────────────────────────────────────────
+// Every 4th wave in endless/free play (skipping %5 siege waves) rolls one modifier.
+// Applied as temporary multipliers AT SPAWN TIME on each orc (never mutates CFG)
+// and reset when the wave ends. Deterministic per wave number (salted per run) so
+// the next-wave preview can show the tag before the wave starts.
+const WAVE_MODIFIERS = [
+  { id: 'SWIFT',    icon: '💨', label: 'SWIFT',    desc: 'Enemy speed ×1.25, rewards ×1.15', speed: 1.25, reward: 1.15 },
+  { id: 'FRENZY',   icon: '🌪️', label: 'FRENZY',   desc: 'Enemies spawn 30% faster',          spawnInt: 0.7 },
+  { id: 'BOUNTY',   icon: '💰', label: 'BOUNTY',   desc: 'Rewards ×1.5',                      reward: 1.5 },
+  { id: 'IRONHIDE', icon: '🛡️', label: 'IRONHIDE', desc: 'Enemy HP ×1.2, rewards ×1.25',      hp: 1.2, reward: 1.25 },
+];
+let _waveMod = null;                                    // active modifier for the running wave
+let _waveModSalt = (Math.random() * 0xffffffff) >>> 0;  // per-run salt → different rolls each run
+
+function _endlessLikeMode() { return !(currentLevel && currentLevel.id !== 'endless'); }
+
+function waveModifierFor(n) {
+  if (!_endlessLikeMode()) return null;
+  if (n < 4 || n % 4 !== 0 || n % 5 === 0) return null;
+  let s = ((n * 2654435761) ^ _waveModSalt) >>> 0;
+  s = (s * 1664525 + 1013904223) >>> 0;
+  return WAVE_MODIFIERS[s % WAVE_MODIFIERS.length];
+}
+
+function _applyWaveModToOrc(o) {
+  if (!_waveMod || !o) return;
+  if (_waveMod.speed)  o.speed  = o.speed * _waveMod.speed;
+  if (_waveMod.hp)     { o.maxHp = Math.round(o.maxHp * _waveMod.hp); o.hp = Math.round(o.hp * _waveMod.hp); }
+  if (_waveMod.reward) o.reward = Math.round(o.reward * _waveMod.reward);
+}
+
 function updateSpawner(dt) {
   if (!waveActive || spawnQueue.length === 0) return;
   spawnTimer -= dt;
@@ -9203,10 +10093,12 @@ function updateSpawner(dt) {
       return;
     }
     spawnQueue.pop();
+    const _nOrcsBefore = orcs.length;
     spawnOrc(type);
+    if (_waveMod && orcs.length > _nOrcsBefore) _applyWaveModToOrc(orcs[orcs.length - 1]);
     updateHUD();
     // Enemies spawn faster in later waves — minimum tightened from 0.65s → 0.50s for late-game pressure
-    spawnTimer = Math.max(0.50, CFG.SPAWN_INTERVAL - (wave - 1) * 0.05);
+    spawnTimer = Math.max(0.50, CFG.SPAWN_INTERVAL - (wave - 1) * 0.05) * (_waveMod?.spawnInt || 1);
   }
 }
 
@@ -9233,11 +10125,24 @@ function checkWaveEnd() {
   if (spawnQueue.some(t => t !== 'pause')) return; // still enemies to spawn
   if (orcs.some(o => o.alive)) return;
   waveActive = false;
+  _waveMod = null; // wave modifier only lives for the duration of its wave
   // Release all lingering attack slots so defenders aren't locked between waves
   for (const o of orcs) {
     if (o.fightingDefender) { releaseAttackSlot(o.fightingDefender, o); o.fightingDefender = null; o.attackSlot = -1; }
   }
   SND.waveComplete();
+
+  // Clutch save: clearing the wave DURING Last Stand ends the countdown with a
+  // celebration instead of silently letting the timer run out mid-breather.
+  if (lastStandActive) {
+    lastStandActive = false;
+    lastStandTimer = 0;
+    elLastStand?.classList.remove('active');
+    elLastStandTimer?.classList.remove('active');
+    castleHp = Math.max(castleHp, Math.floor(CFG.CASTLE_MAX_HP * 0.1)); // survive with 10% HP
+    updateCastleHPBar(); updateCastleHPMesh();
+    showTooltip('🛡️ LAST STAND HELD! The castle endures — 10% HP restored', 3500);
+  }
 
   // Feature 3: star rating — 3 independent criteria
   const starNoDmg   = castleHp >= waveStartHp;                               // castle took 0 damage
@@ -9270,6 +10175,7 @@ function checkWaveEnd() {
   let bonus = 20 + wave * 10;
   if (doubleBonusWave) { bonus *= 2; doubleBonusWave = false; }
   gold += bonus;
+  _runStats.goldEarned += bonus;
 
   // ── Endless mode: milestone bonuses every 5 waves ──
   // Gives the player a satisfying compound reward as they push deeper into endless,
@@ -9340,18 +10246,26 @@ function checkWaveEnd() {
     return;
   }
 
-  // Feature 6: merchant every 3rd wave (not siege waves).
-  // Skip merchant inside levels (only 3 waves each — merchant fires mid-level breaks but
-  // would collide with Level Complete on the last wave; check above already returned for that).
+  // Feature 6: merchant.
+  // Endless/free play: every 3rd wave (not siege waves). Story levels: before the
+  // final wave of each level — the old `wave % 3` rule NEVER fired in story mode
+  // because every level's endWave is a multiple of 3, so the merchant was
+  // accidentally endless-only.
   const inLevel = currentLevel && currentLevel.id !== 'endless';
   const isLastOfLevel = inLevel && wave >= currentLevel.endWave;
-  if (wave % 3 === 0 && wave % 5 !== 0 && !isLastOfLevel) {
+  const merchantDue = inLevel
+    ? (wave === currentLevel.endWave - 1)             // story: breather before the boss wave
+    : (wave % 3 === 0 && wave % 5 !== 0);             // endless/free play: unchanged cadence
+  if (merchantDue && !isLastOfLevel) {
+    // Defer the wave-complete toast: showing it under the merchant modal wastes it.
+    // The merchant close handlers (buy/skip) display it once the modal is gone.
+    _pendingWaveToast = `Wave ${wave} complete! +${bonus}🟡 gold bonus`;
     showMerchant();
   } else {
     document.getElementById('btn-start').disabled = false;
+    updateHUD(); // re-run now that Start is live: ready-pulse + next-wave preview
+    showTooltip(`Wave ${wave} complete! +${bonus}🟡 gold bonus`, 3000);
   }
-
-  showTooltip(`Wave ${wave} complete! +${bonus}🟡 gold bonus`, 3000);
 
   // In endless / pre-level modes: pre-apply next wave's layout/biome so the player builds on the right grid.
   // Inside a level, the biome and layout are fixed for the whole level — skip the rotation.
@@ -9400,7 +10314,15 @@ let _goldPopupLastPos = null;
 function spawnGoldPopup(amount, worldPos) {
   if (amount < 0) { _flushGoldPopup(amount, worldPos); return; }
   _goldPopupAccum += amount;
-  _goldPopupLastPos = worldPos;
+  // MUST clone. Every caller passes `posAbove(...)`, which returns a single shared
+  // module-level Vector3 (see the contract comment on posAbove): it is only safe to
+  // hold until the next posAbove call. This is the one call site that kept the
+  // reference across the 80 ms batching timeout, so by the time the batch flushed the
+  // vector held whatever the last hit-particle / damage-popup in those 5 frames had
+  // written into it — and _flushGoldPopup then projected that instead. Measured: a
+  // unit sold at tile (46,22) put its "+31" popup at screen x=236 instead of x=739,
+  // over on the far side of the map where the fighting was.
+  _goldPopupLastPos = worldPos.clone();
   if (_goldPopupTimer) return;
   _goldPopupTimer = setTimeout(() => {
     _goldPopupTimer = 0;
@@ -9411,9 +10333,11 @@ function spawnGoldPopup(amount, worldPos) {
 }
 function _flushGoldPopup(amount, worldPos) {
   if (!worldPos || amount === 0) return;
-  worldPos.project(camera);
-  const x = (worldPos.x *  0.5 + 0.5) * window.innerWidth;
-  const y = Math.max(68 + 58 + 4, (-worldPos.y * 0.5 + 0.5) * window.innerHeight);
+  // Project a copy: the negative-amount path passes posAbove's shared temp straight
+  // in, and projecting in place would leave that shared vector in NDC space.
+  const p = worldPos.clone().project(camera);
+  const x = (p.x *  0.5 + 0.5) * window.innerWidth;
+  const y = Math.max(68 + 58 + 4, (-p.y * 0.5 + 0.5) * window.innerHeight);
   const el = document.createElement('div');
   el.className = 'gold-popup';
   el.textContent = amount < 0 ? `${amount}🟡` : `+${amount}🟡`;
@@ -9525,6 +10449,59 @@ const elGameOver  = document.getElementById('game-over');
 const elGoStats   = document.getElementById('go-stats');
 const elBtnStart  = document.getElementById('btn-start');
 
+// ── Next-wave preview ────────────────────────────────────────────────────────
+// Shown between waves (whenever Start Wave is ready) so the player can scout the
+// incoming composition and build counters before committing. Reads the pure
+// waveComposition() — elite rolls and siege extras stay a surprise, but the tags
+// warn about them.
+const ENEMY_INFO = {
+  grunt:       { icon: '👹', name: 'Grunt' },
+  brute:       { icon: '👺', name: 'Brute' },
+  boss:        { icon: '👑', name: 'Ogre Champion' },
+  troll:       { icon: '🧌', name: 'Troll (regenerates)' },
+  skeleton:    { icon: '💀', name: 'Skeleton (fast)' },
+  wolf:        { icon: '🐺', name: 'Wolf (fast)' },
+  spider:      { icon: '🕷️', name: 'Spider (very fast, webs)' },
+  cyclops:     { icon: '👁️', name: 'Cyclops (melee crusher)' },
+  enemyArcher: { icon: '🏹', name: 'Orc Archer (ranged)' },
+  exploder:    { icon: '💣', name: 'Exploder (blows up on death)' },
+  healerOrc:   { icon: '💚', name: 'Healer Shaman (heals allies)' },
+  orcMage:     { icon: '🔮', name: 'Orc Mage (ranged, explodes)' },
+  rockTroll:   { icon: '🗿', name: 'Rock Troll (tank, throws boulders)' },
+};
+const elWavePreview = document.getElementById('wave-preview');
+let _wavePreviewKey = '';
+function updateWavePreview() {
+  if (!elWavePreview) return;
+  const ready = elBtnStart && !elBtnStart.disabled && !waveActive && !gameOver && !testMode;
+  if (!ready) {
+    if (_wavePreviewKey !== '') { _wavePreviewKey = ''; elWavePreview.classList.remove('visible'); }
+    return;
+  }
+  const next = wave + 1;
+  const isBossWave = !!(currentLevel && currentLevel.id !== 'endless'
+    && next === currentLevel.endWave && currentLevel.boss);
+  const nextMod = waveModifierFor(next);
+  // Rebuild the DOM only when the upcoming wave actually changes
+  const key = `${next}|${currentLevel?.id ?? 'free'}|${isBossWave}|${nextMod?.id ?? ''}`;
+  if (_wavePreviewKey === key) return;
+  _wavePreviewKey = key;
+
+  const chips = waveComposition(next).map(([type, n]) => {
+    const info = ENEMY_INFO[type] || { icon: '👾', name: type };
+    return `<span class="wp-chip" title="${info.name}">${info.icon}<b>×${n}</b></span>`;
+  }).join('');
+  const tags = [];
+  if (next % 5 === 0) tags.push('<span class="wp-tag wp-siege">⚔️ SIEGE — 40% bigger, elites!</span>');
+  if (isBossWave)     tags.push(`<span class="wp-tag wp-boss">👑 BOSS — ${currentLevel.boss.name}</span>`);
+  if (nextMod)        tags.push(`<span class="wp-tag wp-mod">${nextMod.icon} ${nextMod.label} — ${nextMod.desc}</span>`);
+  elWavePreview.innerHTML =
+    `<div class="wp-title">⚔️ Next: Wave ${next}</div>` +
+    `<div class="wp-chips">${chips}</div>` +
+    (tags.length ? `<div class="wp-tags">${tags.join('')}</div>` : '');
+  elWavePreview.classList.add('visible');
+}
+
 function getMaxDefenders() {
   return Math.min(26, CFG.MAX_DEFENDERS + wave);
 }
@@ -9537,7 +10514,22 @@ function liveDefenderCount() {
 
 function updateHUD() {
   elMana.textContent     = gold;
-  elWaveVal.textContent  = wave;
+  // Story levels show progress within the level ("2/3"); endless/free show the raw wave
+  if (currentLevel && currentLevel.id !== 'endless') {
+    const total = currentLevel.endWave - currentLevel.startWave + 1;
+    if (wave >= currentLevel.startWave) {
+      elWaveVal.textContent = `${wave - currentLevel.startWave + 1}/${total}`;
+      elWaveVal.title = `Wave ${wave} overall`;
+    } else {
+      // Pre-first-wave: the raw global counter used to leak through here, so
+      // starting e.g. level 3 showed a bare "6" — display 0-of-total instead.
+      elWaveVal.textContent = `0/${total}`;
+      elWaveVal.title = `Press Start to begin wave 1 of ${total}`;
+    }
+  } else {
+    elWaveVal.textContent = wave;
+    elWaveVal.title = '';
+  }
   elKillsVal.textContent = kills;
   if (gold >= 500) _unlockAchievement('goldHoarder');
   const cur = liveDefenderCount();
@@ -9585,6 +10577,7 @@ function updateHUD() {
     const startReady = !elBtnStart.disabled && !waveActive && !gameOver && !testMode;
     elBtnStart.classList.toggle('ready', startReady);
   }
+  updateWavePreview();
   updateCastleHPBar();
 }
 
@@ -9728,7 +10721,9 @@ function showWaveBanner(n) {
   }
   // Endless-mode telegraph: append a "what's coming" sub-label after wave 12.
   // Helps the player decide where to spend gold before the wave starts.
-  const sub = _endlessTelegraph(n);
+  let sub = _endlessTelegraph(n);
+  // Wave-modifier tag (endless): show what twist this wave carries
+  if (_waveMod) sub = `${_waveMod.icon} ${_waveMod.label} — ${_waveMod.desc}` + (sub ? `  ·  ${sub}` : '');
   if (sub) {
     _bannerSubLabel.textContent = sub;
     elBanner.appendChild(_bannerSubLabel);
@@ -9810,6 +10805,16 @@ const MERCHANT_POOL = [
   { icon: '💎', name: 'Dragon Hoard',   desc: 'Double gold bonus next wave',       apply: () => { doubleBonusWave = true; } },
 ];
 
+// Wave-complete toast deferred while the merchant modal is up (see endWave).
+let _pendingWaveToast = null;
+function _flushPendingWaveToast(delayMs = 0) {
+  if (!_pendingWaveToast) return;
+  const msg = _pendingWaveToast;
+  _pendingWaveToast = null;
+  if (delayMs > 0) setTimeout(() => showTooltip(msg, 2400), delayMs);
+  else showTooltip(msg, 2400);
+}
+
 function showMerchant() {
   const modal = document.getElementById('merchant');
   const offersEl = document.getElementById('merchant-offers');
@@ -9822,19 +10827,26 @@ function showMerchant() {
     card.className = 'merchant-card';
     card.innerHTML = `<div class="merchant-icon">${offer.icon}</div><div class="merchant-name">${offer.name}</div><div class="merchant-desc">${offer.desc}</div>`;
     card.addEventListener('click', () => {
+      SND.merchantBuy();
       offer.apply();
       modal.classList.remove('visible');
       elBtnStart.disabled = false;
+      updateHUD(); // refresh ready-pulse + next-wave preview now that Start is live again
       showTooltip(`${offer.icon} ${offer.name} activated!`, 2000);
+      _flushPendingWaveToast(2100); // deferred wave-complete toast, after the purchase toast
     });
     offersEl.appendChild(card);
   });
   modal.classList.add('visible');
+  SND.merchantOpen();
 }
 
 document.getElementById('btn-merchant-skip').addEventListener('click', () => {
+  SND.btnClick();
   document.getElementById('merchant').classList.remove('visible');
   elBtnStart.disabled = false;
+  updateHUD(); // refresh ready-pulse + next-wave preview
+  _flushPendingWaveToast();
 });
 
 // Feature 2: persistent high score
@@ -9870,6 +10882,14 @@ const ACHIEVEMENTS = [
   { id: 'allLevels3Star', name: 'Perfect Run',          desc: 'Earn 3 stars on all 5 levels',      icon: '🏆' },
   { id: 'endlessWave20',  name: 'Eternal Defender',     desc: 'Reach wave 20 in endless mode',     icon: '♾️' },
   { id: 'rallyMaster',    name: 'Tactical Genius',      desc: 'Set a soldier rally point',         icon: '🚩' },
+  { id: 'goldSpender1k',  name: 'Big Spender',          desc: 'Spend 1,000 gold in total',         icon: '🪙' },
+  { id: 'goldSpender10k', name: 'Royal Treasury',       desc: 'Spend 10,000 gold in total',        icon: '👛' },
+  { id: 'builder25',      name: 'Field Engineer',       desc: 'Build 25 defenders',                icon: '🔨' },
+  { id: 'builder100',     name: 'Master Architect',     desc: 'Build 100 defenders',               icon: '🏗️' },
+  { id: 'bossSlayer5',    name: 'Boss Breaker',         desc: 'Defeat 5 level bosses',             icon: '⚒️' },
+  { id: 'endlessWave30',  name: 'Unbreakable',          desc: 'Reach wave 30 in endless mode',     icon: '🌀' },
+  { id: 'upgrader10',     name: 'Veteran Trainer',      desc: 'Upgrade units 10 times',            icon: '📈' },
+  { id: 'seller10',       name: 'Shrewd Merchant',      desc: 'Sell 10 defenders',                 icon: '⚖️' },
 ];
 const _ACHIEVEMENT_BY_ID = Object.fromEntries(ACHIEVEMENTS.map(a => [a.id, a]));
 
@@ -9909,6 +10929,18 @@ function _bumpStat(name, delta = 1) {
     if (v >= 1000) _unlockAchievement('slayer1000');
   } else if (name === 'wallsBuilt') {
     if (v >= 50) _unlockAchievement('wallEnjoyer');
+  } else if (name === 'goldSpent') {
+    if (v >= 1000)  _unlockAchievement('goldSpender1k');
+    if (v >= 10000) _unlockAchievement('goldSpender10k');
+  } else if (name === 'defendersBuilt') {
+    if (v >= 25)  _unlockAchievement('builder25');
+    if (v >= 100) _unlockAchievement('builder100');
+  } else if (name === 'bossKills') {
+    if (v >= 5) _unlockAchievement('bossSlayer5');
+  } else if (name === 'upgradesDone') {
+    if (v >= 10) _unlockAchievement('upgrader10');
+  } else if (name === 'unitsSold') {
+    if (v >= 10) _unlockAchievement('seller10');
   }
   saveAchievements();
 }
@@ -9981,11 +11013,19 @@ function recordLevelResult(id, stars) {
 // ─────────────────────────────────────────────
 // Reset all per-run game state (called when starting a new level or retrying).
 // Does NOT reload the page — preserves level progress, settings, unlocks.
+// Per-run counters for the game-over summary. Reset with the run; incremented
+// at the kill-reward, wave-bonus, and defender-placement sites.
+const _runStats = { goldEarned: 0, defendersBuilt: 0, startMs: 0 };
+
 function _resetRunState() {
   gameOver = false;
   waveActive = false;
+  _waveMod = null;
   castleHp = CFG.CASTLE_MAX_HP;
   kills = 0;
+  _runStats.goldEarned = 0;
+  _runStats.defendersBuilt = 0;
+  _runStats.startMs = Date.now();
   totalStars = 0;
   levelStarsEarned = 0;
   levelWaveStars.length = 0;
@@ -10016,9 +11056,32 @@ function _resetRunState() {
   updateHUD?.();
 }
 
+// First-session onboarding: show a one-time "how to play" card when the player
+// first enters a real game. Persisted so it never nags returning players.
+function _maybeShowOnboarding() {
+  let done = false;
+  try { done = localStorage.getItem('td_onboarded') === '1'; } catch {}
+  if (done) return;
+  const card = document.getElementById('onboard-card');
+  if (!card) return;
+  // Delay a beat so it lands after the level's own intro tooltip/banner
+  setTimeout(() => { if (!gameOver && !testMode && !mapEditorMode && !studioMode) card.style.display = 'block'; }, 700);
+}
+(function _wireOnboarding() {
+  const card = document.getElementById('onboard-card');
+  const btn = document.getElementById('onboard-dismiss');
+  btn?.addEventListener('click', () => {
+    if (card) card.style.display = 'none';
+    try { localStorage.setItem('td_onboarded', '1'); } catch {}
+    SND.btnClick?.();
+  });
+})();
+
 function startLevel(id) {
   const lvl = (id === 'endless') ? ENDLESS_LEVEL : LEVELS.find(L => L.id === id);
   if (!lvl) return;
+  _mePlayingMapName = null; // leaving any custom-map play session
+  _maybeShowOnboarding();
   if (!isLevelUnlocked(id)) return;
   applyDifficulty();                    // ensure difficultyMult + music mood reflect the current pick
   _levelRunStartMs = Date.now();        // start clock for "best time"
@@ -10142,6 +11205,8 @@ function showLevelSelect(opts = {}) {
         <div class="ls-node-label">
           <div class="ls-node-name">${unlocked ? L.name : 'Locked'}</div>
           <div class="ls-node-stars">${unlocked ? starsHtml : ''}</div>
+          ${unlocked && L.boss ? `<div class="ls-node-boss" title="This realm's final wave is a boss fight">👑 ${L.boss.name}</div>` : ''}
+          ${unlocked ? `<div class="ls-node-waves">Waves ${L.startWave}–${L.endWave}</div>` : ''}
           ${bestHtml}
         </div>
       `;
@@ -10171,7 +11236,14 @@ function showLevelSelect(opts = {}) {
     // ── TITLE ──
     const banner = document.createElement('div');
     banner.className = 'ls-title-banner';
-    banner.innerHTML = `Select a Realm<span class="lt-sub">THE FIVE REALMS OF AVALON</span>`;
+    {
+      // Aggregate star progress across all story realms — visible without opening Records
+      let starSum = 0;
+      for (const L of LEVELS) starSum += levelProgress[String(L.id)]?.bestStars || 0;
+      const starMax = LEVELS.length * LEVEL_MAX_STARS;
+      banner.innerHTML = `Select a Realm<span class="lt-sub">THE FIVE REALMS OF AVALON` +
+        (starSum > 0 ? ` &nbsp;·&nbsp; ${starSum} / ${starMax} ⭐` : '') + `</span>`;
+    }
     map.appendChild(banner);
 
     // ── RECORDS BUTTON (top-right) — opens the stats/records screen ──
@@ -10276,12 +11348,44 @@ function showStats() {
             <div class="se-val st-none">— no record —</div>`;
   }).join('');
 
+  // ── Free-play personal best ──
+  // Written by saveHighScore() on every non-endless game over; until now it was
+  // only ever shown on the game-over screen itself, never in the Records screen.
+  let freeBest = null;
+  try {
+    const rawFp = localStorage.getItem('tdHighScore');
+    if (rawFp) freeBest = JSON.parse(rawFp);
+  } catch { /* corrupted save — just show "no record" */ }
+  const freeBestRow = freeBest && Number.isFinite(freeBest.wave)
+    ? `<div class="se-diff">🏰 Free Play Best</div>
+       <div class="se-val">Wave ${freeBest.wave} • ${freeBest.kills || 0} kills</div>`
+    : `<div class="se-diff">🏰 Free Play Best</div>
+       <div class="se-val st-none">— no record —</div>`;
+
   // ── Achievements grid ──
+  // Progress counts for counter-based achievements ("47 / 100" beats a bare lock)
+  const ACH_PROGRESS = {
+    centurion:      () => [achievementState.stats.kills || 0, 100],
+    slayer1000:     () => [achievementState.stats.kills || 0, 1000],
+    wallEnjoyer:    () => [achievementState.stats.wallsBuilt || 0, 50],
+    goldSpender1k:  () => [achievementState.stats.goldSpent || 0, 1000],
+    goldSpender10k: () => [achievementState.stats.goldSpent || 0, 10000],
+    builder25:      () => [achievementState.stats.defendersBuilt || 0, 25],
+    builder100:     () => [achievementState.stats.defendersBuilt || 0, 100],
+    bossSlayer5:    () => [achievementState.stats.bossKills || 0, 5],
+    upgrader10:     () => [achievementState.stats.upgradesDone || 0, 10],
+    seller10:       () => [achievementState.stats.unitsSold || 0, 10],
+  };
   const achHtml = ACHIEVEMENTS.map(a => {
     const have = achievementState.unlocked.has(a.id);
+    let prog = '';
+    if (!have && ACH_PROGRESS[a.id]) {
+      const [cur, goal] = ACH_PROGRESS[a.id]();
+      prog = `<span class="sa-prog">${Math.min(cur, goal)} / ${goal}</span>`;
+    }
     return `<div class="stats-ach ${have ? '' : 'locked'}" title="${a.desc}">
       <span class="sa-icon">${have ? a.icon : '🔒'}</span>
-      <span class="sa-name">${a.name}</span>
+      <span class="sa-name">${a.name}</span>${prog}
     </div>`;
   }).join('');
 
@@ -10314,6 +11418,11 @@ function showStats() {
     <div class="stats-section">
       <div class="stats-section-title">ENDLESS MODE — PERSONAL BEST</div>
       <div class="stats-endless-row">${endlessRows}</div>
+    </div>
+
+    <div class="stats-section">
+      <div class="stats-section-title">FREE PLAY — PERSONAL BEST</div>
+      <div class="stats-endless-row">${freeBestRow}</div>
     </div>
 
     <div class="stats-section">
@@ -10397,6 +11506,15 @@ function hideLevelComplete() {
 function triggerGameOver() {
   gameOver = true;
   SND.gameOver();
+  // Custom-map play: record the best wave reached for this saved map
+  if (_mePlayingMapName) {
+    const m = _meSavedMaps.find(x => x.name === _mePlayingMapName);
+    if (m && wave > (m.bestWave || 0)) {
+      m.bestWave = wave;
+      saveSave('td_saved_maps', _meSavedMaps);
+    }
+    _mePlayingMapName = null; // one record per play session
+  }
   elGameOver.classList.add('visible');
   elBtnStart.disabled = true;
   // Mode-specific stats line
@@ -10405,6 +11523,19 @@ function triggerGameOver() {
     ? `Endless • ${DIFFICULTY_PRESETS[currentDifficulty].label}`
     : (currentLevel ? `${currentLevel.name} • ${DIFFICULTY_PRESETS[currentDifficulty].label}` : `${DIFFICULTY_PRESETS[currentDifficulty].label}`);
   if (elGoStats) elGoStats.textContent = `${modeLabel}  •  Wave ${wave} • ${kills} kills • ${CFG.CASTLE_MAX_HP - castleHp} damage taken`;
+  // Run summary — the reward-loop recap a long run deserves
+  const elGoSummary = document.getElementById('go-summary');
+  if (elGoSummary) {
+    const mins = Math.max(0, Math.floor((Date.now() - (_runStats.startMs || Date.now())) / 60000));
+    const secs = Math.max(0, Math.floor((Date.now() - (_runStats.startMs || Date.now())) / 1000) % 60);
+    elGoSummary.innerHTML =
+      `<span>🟡 ${_runStats.goldEarned} gold earned</span>` +
+      `<span>🛡️ ${_runStats.defendersBuilt} defenders built</span>` +
+      `<span>⏱ ${mins}:${String(secs).padStart(2, '0')} survived</span>`;
+  }
+  // Retry label: "Retry Level" only makes sense in story mode
+  const goRetry = document.getElementById('btn-retry');
+  if (goRetry) goRetry.textContent = currentLevel && currentLevel.id !== 'endless' ? '🔄 Retry Level' : '🔄 New Run';
   // Feature 3: show total stars
   const elGoStarsEl = document.getElementById('go-stars');
   if (elGoStarsEl) elGoStarsEl.textContent = `Stars earned: ${totalStars} ⭐`;
@@ -10480,6 +11611,14 @@ function updateCastleTurrets(dt) {
 // ─────────────────────────────────────────────
 const clock = new THREE.Clock();
 let _gameLoopRafId = null; // track pending rAF so enterTestMode can cancel it
+
+// ── Headless / CI mode ──────────────────────────────────────────────────────
+// `?headless` skips almost all rendering so the TEST harness can run game
+// logic at full speed under software GL (CI containers, headless Chromium,
+// where a full render takes 300ms+). One frame per second is still drawn so
+// screenshots stay meaningful.
+const HEADLESS = new URLSearchParams(window.location.search).has('headless');
+let _lastHeadlessRenderMs = 0;
 let _defVoiceTimer = 5 + Math.random() * 7;   // seconds until next defender chatter
 let _orcVoiceTimer = 3 + Math.random() * 6;   // seconds until next enemy roar
 let _intensityCheckTimer = 0;
@@ -10511,19 +11650,31 @@ function _testWait(ms) {
 function gameLoop() {
   if (!testMode) _gameLoopRafId = requestAnimationFrame(gameLoop);
   else if (_mcTickEnabled) _scheduleTestTick();
-  const dt = Math.min(clock.getDelta(), 0.05) * gameSpeed;
+  const rawDt = Math.min(clock.getDelta(), 0.05); // wall-clock step — drives ambience (clouds, motes)
+  const dt = rawDt * gameSpeed;
   const t  = clock.elapsedTime;
   gameTime += dt;
 
   if (!gameOver) {
-    updateSpawner(dt);
-    updateTestSpawner(dt);
-    updateOrcs(dt, t);
-    updateDefenders(dt, t);
-    updateCastleTurrets(dt);
-    updateProjectiles(dt);
-    updateVFX(dt);
-    updateWebZones(dt);
+    // Substep the combat simulation so high game speeds stay accurate at low
+    // frame rates: a single 0.1-0.2s step makes enemies blow past engagement
+    // checks and defenders lose whole attack windows, so 2×/4× play on a slow
+    // machine (or the headless test harness) silently favored the attackers.
+    // Animations read phase fields, so passing the same `t` per substep is fine.
+    const MAX_STEP = 1 / 30;
+    let _remaining = dt;
+    do {
+      const sdt = Math.min(_remaining, MAX_STEP);
+      _remaining -= sdt;
+      updateSpawner(sdt);
+      updateTestSpawner(sdt);
+      updateOrcs(sdt, t);
+      updateDefenders(sdt, t);
+      updateCastleTurrets(sdt);
+      updateProjectiles(sdt);
+      updateVFX(sdt);
+      updateWebZones(sdt);
+    } while (_remaining > 1e-9);
 
     // ── Dynamic music intensity ───────────────────────────────────────────
     _intensityCheckTimer -= dt;
@@ -10594,7 +11745,10 @@ function gameLoop() {
       }
     }
 
-    M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
+    updateClouds(t);
+  updateAmbientParticles(rawDt, t);
+  updateDayNight(t);
+  M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
     M.waterDeep.emissiveIntensity    = 0.28 + Math.sin(t * 1.7) * 0.12;
     M.waterShallow.emissiveIntensity = 0.18 + Math.sin(t * 1.4 + 0.6) * 0.09;
     waterSurfaces.forEach(ws => {
@@ -10693,7 +11847,22 @@ function gameLoop() {
   if (selectedDef && _defPanel.style.display !== 'none') _updateDefPanelPos();
 
   controls.update();
-  renderer.render(scene, camera);
+  // Headless: never render while a TEST battle is in flight — cold software-GL
+  // renders can block for multiple seconds (shader compilation), starving the
+  // logic loop and making first-after-load battles time out at a tenth speed.
+  const _headlessSkip = HEADLESS &&
+    (window._battleWatcher || performance.now() - _lastHeadlessRenderMs <= 1000);
+  if (!_headlessSkip) {
+    if (bloomEnabled) composer.render();
+    else renderer.render(scene, camera);
+    // Stamp AFTER the render returns: on a cold page a software-GL render can
+    // take >1s (shader compilation), and stamping before it meant the 1s gate
+    // was already elapsed by the next frame — so EVERY frame rendered and the
+    // logic loop crawled at ~1-2Hz. That was the "first battle after load
+    // stalls/times out" bug: enemies moved at a tenth speed until shaders
+    // warmed. Stamping after guarantees ≥1s of unblocked logic between frames.
+    _lastHeadlessRenderMs = performance.now();
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -10730,8 +11899,8 @@ canvas.addEventListener('mousemove', (e) => {
         _mePaintLastKey = dragKey;
         // Skip the first tile — the initial click/right-click handler already placed/erased it.
         if (_meDragStarted) {
-          if (e.buttons === 2) _meEraseAt(tile.col, tile.row);
-          else                 _mePlaceAt(tile.col, tile.row);
+          if (e.buttons === 2) _meApplyTool(tile.col, tile.row, true);
+          else                 _meApplyTool(tile.col, tile.row);
         } else {
           _meDragStarted = true;
         }
@@ -10767,7 +11936,7 @@ canvas.addEventListener('click', (e) => {
   if (studioMode && studioTab === 'world') { _worldPickObject(e.clientX, e.clientY); return; }
   if (mapEditorMode) {
     const tile = _rayToTile(e.clientX, e.clientY);
-    if (tile) _mePlaceAt(tile.col, tile.row);
+    if (tile) _meApplyTool(tile.col, tile.row);
     return;
   }
   if (testMode && selectedEnemyType) {
@@ -10869,7 +12038,25 @@ document.addEventListener('mousedown', e => {
 }, { capture: true, passive: true });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'b' || e.key === 'B') { if (studioMode) exitStudio(); else enterStudio(); return; }
+  if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Ignore while typing (map name, test scripts, layer rename, …) and while a
+    // blocking modal is up — 'b' in an input used to yank the player into Studio.
+    if (document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/i.test(document.activeElement.tagName)) return;
+    const modalOpen =
+      document.getElementById('level-select')?.classList.contains('visible') ||
+      document.getElementById('level-complete')?.classList.contains('visible') ||
+      document.getElementById('stats-screen')?.classList.contains('visible') ||
+      document.getElementById('merchant')?.classList.contains('visible') ||
+      document.getElementById('game-over')?.classList.contains('visible') ||
+      document.getElementById('esc-menu')?.classList.contains('open');
+    if (modalOpen) return;
+    // Route through the mode switcher so test/map modes exit cleanly first —
+    // calling enterStudio() directly stacked Studio on top of whatever mode was open.
+    if (window._switchToMode) window._switchToMode(studioMode ? 'game' : 'studio');
+    else if (studioMode) exitStudio();
+    else enterStudio();
+    return;
+  }
   // ── Studio build-tab keyboard shortcuts ──────────────────────────────────
   if (studioMode && studioTab === 'build') {
     const isInput = document.activeElement?.tagName === 'INPUT';
@@ -10933,6 +12120,7 @@ window.addEventListener('keyup', e => { _camKeys.delete(e.code); });
 //  • U           → upgrade currently selected defender (if affordable)
 //  • X / Delete  → sell currently selected defender
 //  • R           → set/cancel rally for selected soldier
+//  • M           → mute / unmute all audio
 //  All ignored while typing in inputs / studio mode / map editor.
 // ─────────────────────────────────────────────
 window.addEventListener('keydown', (e) => {
@@ -10963,6 +12151,12 @@ window.addEventListener('keydown', (e) => {
     if (!testMode) { e.preventDefault(); elBtnPause?.click(); }
     return;
   }
+  // M → mute / unmute all audio (defined in _initSettings)
+  if (e.key === 'm' || e.key === 'M') {
+    e.preventDefault();
+    window._toggleGlobalMute?.();
+    return;
+  }
 
   // Number keys → build tool by hotkey
   if (e.key >= '0' && e.key <= '9') {
@@ -10987,6 +12181,17 @@ window.addEventListener('keydown', (e) => {
       if (_dpUpgradeBtn && !_dpUpgradeBtn.disabled) _dpUpgradeBtn.click();
       return;
     }
+    if ((e.key === 'x' || e.key === 'X') && e.shiftKey) {
+      // Shift+X → sell ALL defenders of the selected unit's type
+      e.preventDefault();
+      if (_dpSellBtn && _dpSellBtn.style.display !== 'none') {
+        const type = selectedDef.type;
+        selectedDef = null;
+        _defPanel.style.display = 'none';
+        sellAllOfType(type);
+      }
+      return;
+    }
     if (e.key === 'x' || e.key === 'X' || e.key === 'Delete') {
       e.preventDefault();
       if (_dpSellBtn && _dpSellBtn.style.display !== 'none') _dpSellBtn.click();
@@ -11008,6 +12213,10 @@ window.addEventListener('keydown', (e) => {
   // Ctrl+Z → undo
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault(); _meUndo(); return;
+  }
+  // Ctrl+Y / Ctrl+Shift+Z → redo
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y' || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+    e.preventDefault(); _meRedo(); return;
   }
   // Single-key tool picks: G/D/S/W/L for tile types, T for tree, R for rock,
   // E for erase, P for play test
@@ -11036,7 +12245,7 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   if (mapEditorMode) {
     const tile = _rayToTile(e.clientX, e.clientY);
-    if (tile) _meEraseAt(tile.col, tile.row);
+    if (tile) _meApplyTool(tile.col, tile.row, true);
     return;
   }
   if (selectedTool) {
@@ -11089,25 +12298,63 @@ canvas.addEventListener('mousemove', (e) => {
 });
 canvas.addEventListener('mouseup', () => { _paintLastKey = null; });
 
+// Core removal + refund shared by single-sell and sell-all. Returns the refund
+// (0 = not sellable). Skips wall-cache rebuild when `deferWallCache` — callers
+// batching wall sells rebuild once afterwards.
+function _sellDefender(def, deferWallCache = false) {
+  if (!def || !def.alive || def.type === 'spiketrap') return 0;
+  const refund = Math.floor(totalCostPaid(def) * 0.5);
+  gold += refund;
+  if (def.hpBar) { def.hpBar.bg.visible = false; def.hpBar.fg.visible = false; }
+  if (def._rallyMarker) { scene.remove(def._rallyMarker); def._rallyMarker = null; }
+  occupied.delete(`${def.col},${def.row}`);
+  const sellPos = posAbove(def.group.position, 1.5);
+  scene.remove(def.group); disposeGroup(def.group);
+  defenders.splice(defenders.indexOf(def), 1);
+  // A sold unit must report itself dead. Enemies hold direct references
+  // (`o.fightingDefender`, `o.blockedByWall`) and release them only via `.alive`, so
+  // leaving this true left attackers locked onto an invisible, already-disposed unit:
+  // measured 3 grunts standing still for ~6 s chewing a sold tower's 35 HP down to 0
+  // before they moved on. dealDefenderDamage() is also `.alive`-guarded, so this stops
+  // the ghost's death branch running later and deleting the `occupied` entry of a
+  // building the player has since rebuilt on that tile, counting a defender loss
+  // against the wave's "no losses" star, and playing a death sound on bare ground.
+  def.alive = false;
+  if (def.type === 'wall' && !deferWallCache) _rebuildWallCache();
+  spawnGoldPopup(refund, sellPos);
+  _bumpStat('unitsSold', 1);
+  return refund;
+}
+
 function sellDefenderAt(col, row) {
   const key = `${col},${row}`;
   if (!occupied.has(key)) return;
   const def = defenders.find(d => d.col === col && d.row === row && d.alive);
   if (!def) return;
   if (def.type === 'spiketrap') { showTooltip('Spike traps cannot be sold!', 1800); return; }
-  const refund = Math.floor(totalCostPaid(def) * 0.5);
-  gold += refund;
+  const refund = _sellDefender(def);
   updateHUD();
-  if (def.hpBar) { def.hpBar.bg.visible = false; def.hpBar.fg.visible = false; }
-  if (def._rallyMarker) { scene.remove(def._rallyMarker); def._rallyMarker = null; }
-  occupied.delete(key);
-  const sellPos = posAbove(def.group.position, 1.5);
-  scene.remove(def.group); disposeGroup(def.group);
-  defenders.splice(defenders.indexOf(def), 1);
-  if (def.type === 'wall') _rebuildWallCache();
-  spawnGoldPopup(refund, sellPos);
   SND.sellRefund();
   showTooltip(`Sold for ${refund}🟡`, 1500);
+}
+
+// Sell every living defender of `type` with the same refund rules (Shift+X with
+// a unit selected). Returns {count, total} for the summary toast.
+function sellAllOfType(type) {
+  if (!type || type === 'spiketrap') { showTooltip('Spike traps cannot be sold!', 1800); return { count: 0, total: 0 }; }
+  const targets = defenders.filter(d => d.alive && d.type === type);
+  let total = 0, count = 0;
+  for (const def of targets) {
+    total += _sellDefender(def, true); // targets pre-filtered: every call sells
+    count++;
+  }
+  if (count === 0) return { count: 0, total: 0 };
+  if (type === 'wall') _rebuildWallCache();
+  updateHUD();
+  SND.sellRefund();
+  const name = (_DP_NAMES[type] || type).toLowerCase();
+  showTooltip(`Sold ${count} ${name}${count > 1 ? 's' : ''} for ${total}🟡`, 2200);
+  return { count, total };
 }
 
 // ─────────────────────────────────────────────
@@ -11203,19 +12450,20 @@ function _refreshDefPanel() {
   _dpRate.textContent  = d.rate  != null ? d.rate.toFixed(1) + '/s'    : '—';
   // Kill counter in name area
   const killCount = d.kills || 0;
-  _dpStars.textContent = (lv === 3 ? '★★★' : lv === 2 ? '★★' : '★') + (killCount > 0 ? `  💀${killCount}` : '');
+  _dpStars.textContent = (lv >= 4 ? '★★★★' : lv === 3 ? '★★★' : lv === 2 ? '★★' : '★') + (killCount > 0 ? `  💀${killCount}` : '');
 
   // Upgrade button
   if (d.type === 'spiketrap' || d.type === 'wall') {
     _dpUpgradeBtn.disabled = true;
     _dpUpgradeBtn.textContent = 'No Upgrade';
-  } else if (lv >= 3) {
+  } else if (lv >= 4) {
     _dpUpgradeBtn.disabled = true;
     _dpUpgradeBtn.textContent = 'Max Level';
   } else {
     const isBuilding = ['tower', 'catapult', 'archer', 'mage', 'ballista'].includes(d.type);
-    const cost = d.type === 'wall' ? CFG.COSTS.wall * lv : CFG.COSTS[d.type] * lv * (isBuilding ? 2 : 1);
-    const killsNeeded = d.type === 'wall' ? (lv === 1 ? 0 : 15) : (lv === 1 ? 10 : 25);
+    let cost = d.type === 'wall' ? CFG.COSTS.wall * lv : CFG.COSTS[d.type] * lv * (isBuilding ? 2 : 1);
+    if (lv === 3) cost = Math.round(cost * 1.5); // level-4 elite premium (mirrors tryUpgradeDefender)
+    const killsNeeded = d.type === 'wall' ? (lv === 1 ? 0 : 15) : (lv === 1 ? 10 : lv === 2 ? 25 : 50);
     const myKills = d.kills || 0;
     const killsOk = myKills >= killsNeeded;
     _dpUpgradeBtn.disabled = gold < cost || !killsOk;
@@ -11231,6 +12479,7 @@ function _refreshDefPanel() {
   _dpSellBtn.style.display = d.type === 'spiketrap' ? 'none' : '';
   const refund = Math.floor(totalCostPaid(d) * 0.5);
   _dpSellBtn.textContent = `Sell  +${refund}🟡`;
+  _dpSellBtn.title = 'X: sell this unit — Shift+X: sell ALL of this type';
 
   // Rally button — only soldiers (knight/swordsman/spearman/archer). Three visual states:
   // (idle): "Set Rally" — click to enter targeting mode
@@ -11417,6 +12666,29 @@ function _studioMakeGeometry(shape, w, h, d) {
     default:        geo = new THREE.BoxGeometry(Math.max(0.05, w), Math.max(0.05, h), Math.max(0.05, d)); break;
   }
   return _studioSnapGeometry(geo);
+}
+
+// ── Studio → game bridge ────────────────────────────────────────────────────
+// Rebuild a saved studio object as a self-contained group in the MAIN scene at
+// a map tile. Same parts recipe the studio Library saves; hidden layers are
+// skipped, matching what the author saw when saving.
+function buildStudioObjectGroup(data, col, row) {
+  const g = new THREE.Group();
+  const hiddenLayers = new Set((data.layers || []).filter(l => l.visible === false).map(l => l.id));
+  for (const pd of (data.parts || [])) {
+    if (pd.layerId && hiddenLayers.has(pd.layerId)) continue;
+    const m = new THREE.Mesh(
+      _studioMakeGeometry(pd.shape || 'box', pd.w, pd.h, pd.d),
+      _studioMakeMaterial(pd.color || 0x999999),
+    );
+    m.position.set(pd.x || 0, pd.y || 0, pd.z || 0);
+    m.rotation.set(pd.rx || 0, pd.ry || 0, pd.rz || 0);
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
+  }
+  g.position.set(col, 0, row);
+  scene.add(g);
+  return g;
 }
 
 function _studioInit() {
@@ -11829,6 +13101,7 @@ function _stLayerRefreshUI() {
   if (!list) return;
   list.innerHTML = '';
   [..._stLayers].reverse().forEach(lay => {
+    const idx = _stLayers.indexOf(lay); // position in the REAL array (display list is reversed)
     const row = document.createElement('div');
     row.className = 'studio-layer-item' + (lay.id === _stActiveLayerId ? ' active' : '');
     row.dataset.id = lay.id;
@@ -11977,7 +13250,7 @@ function _studioRefreshList() {
     const lb = document.createElement('button');
     lb.className = 'studio-obj-load' + (obj.name === studioLoadedName ? ' active' : '');
     lb.textContent = obj.name;
-    lb.title = `${obj.parts.length} part(s)`;
+    lb.title = `${obj.parts.length} part(s) · placeable in the Map Editor`;
     lb.addEventListener('click', () => { _studioLoad(obj); _studioRefreshList(); });
     const db = document.createElement('button');
     db.className = 'studio-obj-del';
@@ -12242,7 +13515,7 @@ document.querySelectorAll('.world-filter').forEach(b =>
 // ─────────────────────────────────────────────
 //  UNIT LAB MODE
 // ─────────────────────────────────────────────
-const _UNIT_DEF_TYPES = ['wall','tower','catapult','archer','swordsman','knight','spearman','mage','ballista'];
+const _UNIT_DEF_TYPES = ['wall','tower','catapult','archer','swordsman','knight','spearman','mage','ballista','spiketrap'];
 const _UNIT_ORC_KEYS  = Object.keys(CFG.ORC_TYPES);
 
 const _DEF_STAT_CFG = {
@@ -12278,7 +13551,10 @@ function _unitLabInitButtons() {
   _UNIT_ORC_KEYS.forEach(t => {
     const b = document.createElement('button');
     b.className = 'unit-type-btn'; b.dataset.utype = t; b.dataset.ucat = 'enemy';
-    b.textContent = t.slice(0,7);
+    // Readable label from the camelCase key ("enemyArcher" -> "Enemy Archer")
+    const nice = t.replace(/([A-Z])/g, ' $1');
+    b.textContent = nice.charAt(0).toUpperCase() + nice.slice(1);
+    b.title = b.textContent;
     b.addEventListener('click', () => _unitLabSelect(t, 'enemy'));
     orcGrid.appendChild(b);
   });
@@ -12399,6 +13675,10 @@ function _unitPreviewInit() {
 
   // Very dim ambient — keeps edges dark
   _unitPreviewScene.add(new THREE.AmbientLight(0x0a1a2a, 0.6));
+  // Hemisphere fallback: guarantees the model is never pure black even when the
+  // spotlight/shadow path degrades (software GL, weak GPUs). Dim enough that the
+  // spotlight still dominates the look on real hardware.
+  _unitPreviewScene.add(new THREE.HemisphereLight(0x33465e, 0x141a22, 1.1));
 
   // Main warm spotlight from above-front — the "cutoff room" beam
   const spot = new THREE.SpotLight(0xfff3d0, 6.0, 14, Math.PI / 9, 0.3, 1.4);
@@ -12471,11 +13751,19 @@ function _buildPreviewGroup(type, cat) {
 function _unitPreviewDisposeGroup() {
   if (!_unitPreviewGroup) return;
   if (_unitPreviewScene) _unitPreviewScene.remove(_unitPreviewGroup);
+  // Preview groups are built from the live unit builders, so they reference the
+  // SHARED M.* palette materials (and their shared grain maps). Only dispose
+  // geometry and genuinely unique materials — never shared ones, or the next
+  // in-game render of that material would show an empty (disposed) texture.
   _unitPreviewGroup.traverse(child => {
     if (!child.isMesh) return;
     child.geometry?.dispose();
     const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach(m => { if (m?.map) m.map.dispose(); m?.dispose(); });
+    mats.forEach(m => {
+      if (!m || _SHARED_MATERIALS.has(m)) return;
+      if (m.map && !_SHARED_MATERIALS.has(m)) m.map.dispose();
+      m.dispose();
+    });
   });
   _unitPreviewGroup = null;
 }
@@ -12611,6 +13899,10 @@ function _meBuildGhost(tool) {
   } else if (tool === 'well') {
     addBox(0.72, 0.43, 0.72, 0, 0.215, 0);
     addBox(0.62, 0.07, 0.62, 0, 0.89, 0);
+  } else if (tool && tool.startsWith('custom:')) {
+    // Studio object: generic crate silhouette (actual footprint varies per build)
+    addBox(0.9, 0.9, 0.9, 0, 0.45, 0);
+    addBox(0.5, 0.3, 0.5, 0, 1.05, 0);
   }
   return g;
 }
@@ -12648,6 +13940,36 @@ const ME_TILE_TOOLS = {
   pathC:  { mat: () => M.mePathC,  type: 'path',  pathIdx: 2 },
 };
 
+// Studio-object defs embedded in the currently loaded map (name -> recipe).
+// Makes saved maps self-contained: they render even if the studio library
+// entry was deleted, and survive export/import to another browser.
+let _meCustomDefs = {};
+function _meGetStudioObject(name) {
+  const lib = loadSave('td_studio_objects', null);
+  const fromLib = Array.isArray(lib) ? lib.find(o => o.name === name) : null;
+  return fromLib || _meCustomDefs[name] || null;
+}
+
+// Apply the active tool across the brush footprint. Brush >1 applies only to
+// plain tile tools and erase — paths need deliberate single-tile routing, and
+// objects would collide with their own footprints.
+function _meApplyTool(col, row, forceErase = false) {
+  const erase = forceErase || _meActiveTool === 'erase';
+  const td = ME_TILE_TOOLS[_meActiveTool];
+  const brushable = erase || (td && td.pathIdx === undefined);
+  const size = brushable ? _meBrushSize : 1;
+  const apply = erase ? _meEraseAt : _mePlaceAt;
+  if (size === 1) { apply(col, row); return; }
+  const o0 = -Math.floor((size - 1) / 2);
+  // Single click with a wide brush: batch the stamp so one Ctrl+Z reverses it all
+  const ownBatch = !_meUndoBatch;
+  if (ownBatch) _meBeginUndoBatch();
+  for (let dc = 0; dc < size; dc++) {
+    for (let dr = 0; dr < size; dr++) apply(col + o0 + dc, row + o0 + dr);
+  }
+  if (ownBatch) _meEndUndoBatch();
+}
+
 function _mePlaceAt(col, row) {
   if (_meActiveTool === 'erase') { _meEraseAt(col, row); return; }
 
@@ -12680,16 +14002,27 @@ function _mePlaceAt(col, row) {
     cell.mesh.material = td.mat();
     cell.type = td.type;
     _meTileOverrides[key].newType = _meActiveTool;
-    // For path tools, track ordered path tiles
+    // A tile belongs to at most ONE lane: painting lane B (or a plain tile) over
+    // an A tile removes it from A — previously it lingered in both path arrays.
+    const removedFromLanes = [];
+    for (let pi2 = 0; pi2 < 3; pi2++) {
+      if (pi2 !== td.pathIdx && _mePathTiles[pi2][key]) {
+        delete _mePathTiles[pi2][key];
+        _mePaths[pi2] = _mePaths[pi2].filter(([c,r]) => !(c===col && r===row));
+        removedFromLanes.push(pi2);
+      }
+    }
+    // For path tools, track path tile membership
     if (td.pathIdx !== undefined) {
       const pi = td.pathIdx;
       if (!_mePathTiles[pi][key]) {
         _mePathTiles[pi][key] = true;
         _mePaths[pi].push([col, row]);
       }
-      // Update PATHS and PATH_SET so enemies walk on these
-      _meRebuildPaths();
     }
+    // Update PATHS and PATH_SET so enemies walk on these
+    if (td.pathIdx !== undefined || removedFromLanes.length) _meRebuildPaths();
+    const paintedTool = _meActiveTool;
     _mePushUndo(() => {
       // Reverse: restore old material/type, restore object, fix path arrays
       cell.mesh.material = prevMat;
@@ -12700,9 +14033,19 @@ function _mePlaceAt(col, row) {
       if (td.pathIdx !== undefined && !prevPath.includes(td.pathIdx)) {
         delete _mePathTiles[td.pathIdx][key];
         _mePaths[td.pathIdx] = _mePaths[td.pathIdx].filter(([c,r]) => !(c===col && r===row));
-        _meRebuildPaths();
       }
+      // Restore membership in lanes this paint evicted the tile from
+      for (const pi2 of removedFromLanes) {
+        if (!_mePathTiles[pi2][key]) { _mePathTiles[pi2][key] = true; _mePaths[pi2].push([col, row]); }
+      }
+      _meRebuildPaths();
       if (erasedObj) _meRestoreObject(erasedObj);
+    }, () => {
+      // Redo: re-run the same paint with the original tool (guarded by _meReplaying,
+      // so the replay records no new undo entry)
+      const t0 = _meActiveTool;
+      _meActiveTool = paintedTool;
+      try { _mePlaceAt(col, row); } finally { _meActiveTool = t0; }
     });
     return;
   }
@@ -12741,20 +14084,39 @@ function _mePlaceAt(col, row) {
     staticObstacles.push({ x: col, z: row, r: 0.18 });
   }
   else if (_meActiveTool === 'well') group = buildWell(col, row, _meSeededRng(seed));
+  else if (_meActiveTool.startsWith('custom:')) {
+    // Studio-built object placed as a map prop
+    const objName = _meActiveTool.slice(7);
+    const objData = _meGetStudioObject(objName);
+    if (!objData) { showTooltip(`Studio object "${objName}" not found — rebuild it in the Studio`, 2200); return; }
+    group = buildStudioObjectGroup(objData, col, row);
+    staticObstacles.push({ x: col, z: row, r: 0.4 });
+    if (cell.type === 'grass') cell.type = 'scenery';
+  }
 
   if (group) {
     group.userData.meItem = true;
     const item = { type: _meActiveTool, col, row, scale, seed, group };
     _meItems.push(item);
+    // Captured by undo so redo can restore the EXACT same object (same group,
+    // same obstacle) rather than rebuilding a differently-seeded one.
+    let _rmObs = null, _wasScenery = false;
     _mePushUndo(() => {
       // Reverse: remove the placed object exactly as erase would
       scene.remove(item.group);
       const i = _meItems.indexOf(item);
       if (i !== -1) _meItems.splice(i, 1);
       const si = staticObstacles.findIndex(o => Math.abs(o.x - col) < 0.5 && Math.abs(o.z - row) < 0.5);
-      if (si !== -1) staticObstacles.splice(si, 1);
+      if (si !== -1) { _rmObs = staticObstacles[si]; staticObstacles.splice(si, 1); }
       const cell2 = grid[`${col},${row}`];
-      if (cell2 && cell2.type === 'scenery') cell2.type = 'grass';
+      _wasScenery = !!(cell2 && cell2.type === 'scenery');
+      if (_wasScenery) cell2.type = 'grass';
+    }, () => {
+      scene.add(item.group);
+      _meItems.push(item);
+      if (_rmObs) staticObstacles.push(_rmObs);
+      const cell2 = grid[`${col},${row}`];
+      if (_wasScenery && cell2) cell2.type = 'scenery';
     });
   }
 }
@@ -12774,11 +14136,59 @@ function _meRestoreObject(captured) {
   else if (captured.kind === 'initialScenery') initialScenery.push(captured.item);
 }
 
+// Order a lane's tiles into a walkable chain: start at the spawn-most (lowest col)
+// tile, then greedily hop to the nearest remaining tile. Freehand paint order —
+// scribbles, backtracks, painting the middle first — becomes a sane spawn→castle
+// route instead of enemies teleporting between tiles in raw click order.
+function _meOrderPathTiles(tiles) {
+  if (tiles.length < 3) return tiles.slice();
+  const rest = tiles.slice();
+  let idx = 0;
+  for (let i = 1; i < rest.length; i++) {
+    if (rest[i][0] < rest[idx][0] || (rest[i][0] === rest[idx][0] && rest[i][1] < rest[idx][1])) idx = i;
+  }
+  const out = [rest.splice(idx, 1)[0]];
+  while (rest.length) {
+    const [cc, cr] = out[out.length - 1];
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < rest.length; i++) {
+      const d = Math.abs(rest[i][0] - cc) + Math.abs(rest[i][1] - cr);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    out.push(rest.splice(best, 1)[0]);
+  }
+  return out;
+}
+
+// Pre-flight report for Test Play: human-readable warnings about lanes that will
+// play badly (gaps, wrong start/end). Informative, never blocking.
+function _meValidatePaths() {
+  const laneNames = ['A', 'B', 'C'];
+  const warnings = [];
+  let any = false;
+  for (let pi = 0; pi < 3; pi++) {
+    if (!_mePaths[pi].length) continue;
+    any = true;
+    const tiles = _meOrderPathTiles(_mePaths[pi]);
+    const L = laneNames[pi];
+    if (tiles.length < 8) warnings.push(`Path ${L} is very short (${tiles.length} tile${tiles.length === 1 ? '' : 's'})`);
+    let gaps = 0;
+    for (let i = 1; i < tiles.length; i++) {
+      const d = Math.max(Math.abs(tiles[i][0] - tiles[i-1][0]), Math.abs(tiles[i][1] - tiles[i-1][1]));
+      if (d > 1) gaps++;
+    }
+    if (gaps) warnings.push(`Path ${L} has ${gaps} gap${gaps > 1 ? 's' : ''} — enemies will jump ${gaps > 1 ? 'them' : 'it'}`);
+    if (tiles[0][0] > 4) warnings.push(`Path ${L} doesn't start at the left (spawn) edge`);
+    if (tiles[tiles.length - 1][0] < 58) warnings.push(`Path ${L} doesn't reach the castle side`);
+  }
+  return { any, warnings };
+}
+
 // Rebuild PATHS[0/1/2] and PATH_SET from the editor's path tile data
 function _meRebuildPaths() {
   const allPathKeys = new Set();
   for (let pi = 0; pi < 3; pi++) {
-    PATHS[pi] = _mePaths[pi].slice();
+    PATHS[pi] = _meOrderPathTiles(_mePaths[pi]);
     _mePaths[pi].forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
   }
   // Merge with pre-existing PATH_SET (layout paths) — don't wipe game paths
@@ -12854,19 +14264,32 @@ function _meEraseAt(col, row) {
       if (wasScenery && cell) cell.type = 'scenery';
     });
   }
-  // 1c. Remove path lanterns near this tile (within 1 tile radius)
+  // 1c. Remove path lanterns near this tile (within 1 tile radius).
+  // Keep the lamp objects alive (no dispose) so the undo entry can restore
+  // them — they used to be disposed with no undo action, so Ctrl+Z after an
+  // erase silently lost every nearby lantern.
+  const removedLamps = [];
   for (let i = lanternGroup.children.length - 1; i >= 0; i--) {
     const lamp = lanternGroup.children[i];
     if (Math.abs(lamp.position.x - col) < 1.0 && Math.abs(lamp.position.z - row) < 1.0) {
+      const lampLights = [];
       lamp.traverse(child => {
         if (child.isLight) {
           const li = lanternLights.indexOf(child);
-          if (li !== -1) lanternLights.splice(li, 1);
+          if (li !== -1) { lampLights.push(child); lanternLights.splice(li, 1); }
         }
       });
-      disposeGroup(lamp);
       lanternGroup.remove(lamp);
+      removedLamps.push({ lamp, lights: lampLights });
     }
+  }
+  if (removedLamps.length) {
+    undoActions.push(() => {
+      for (const { lamp, lights } of removedLamps) {
+        lanternGroup.add(lamp);
+        for (const l of lights) lanternLights.push(l);
+      }
+    });
   }
   // 2. Restore tile override
   if (_meTileOverrides[key]) {
@@ -12902,9 +14325,14 @@ function _meEraseAt(col, row) {
   }
   _meRebuildPaths();
 
-  // Group all sub-undos into a single undo entry — one Ctrl+Z reverses the whole erase
+  // Group all sub-undos into a single undo entry — one Ctrl+Z reverses the whole erase.
+  // Redo simply re-runs the erase on the restored state (guarded by _meReplaying so
+  // the replay records nothing new).
   if (undoActions.length) {
-    _mePushUndo(() => { for (let i = undoActions.length - 1; i >= 0; i--) undoActions[i](); });
+    _mePushUndo(
+      () => { for (let i = undoActions.length - 1; i >= 0; i--) undoActions[i](); },
+      () => { _meEraseAt(col, row); },
+    );
   }
 }
 
@@ -12931,6 +14359,10 @@ function _meClearAll() {
   // Remove all hill meshes
   for (const m of hillMeshes) { m.geometry.dispose(); scene.remove(m); }
   hillMeshes.length = 0;
+
+  // Remove border mountain ranges — disposes every cached biome group, not just the attached one
+  disposeMountainCache();
+  _mountainsActive = false;
 
   // Restore pond tiles to grass and remove water surface planes
   for (const pc of pondCells) {
@@ -12974,6 +14406,16 @@ function _meSaveMap(name) {
     }),
     paths: _mePaths.map(p => p.map(([c,r]) => [c,r])),
   };
+  // Embed the recipes for any studio objects this map uses, so the map file is
+  // self-contained (shareable via export, robust to library deletions)
+  const usedCustom = [...new Set(_meItems.filter(i => i.type.startsWith('custom:')).map(i => i.type.slice(7)))];
+  if (usedCustom.length) {
+    data.customDefs = {};
+    for (const n of usedCustom) {
+      const d = _meGetStudioObject(n);
+      if (d) data.customDefs[n] = { name: d.name, layers: d.layers, parts: d.parts };
+    }
+  }
   const existing = _meSavedMaps.findIndex(m => m.name === data.name);
   if (existing !== -1) _meSavedMaps[existing] = data;
   else _meSavedMaps.push(data);
@@ -12984,6 +14426,7 @@ function _meSaveMap(name) {
 
 function _meLoadMap(data) {
   _meClearAll();
+  _meCustomDefs = data.customDefs || {};
   if (data.biome >= 0) {
     activeBiomeIdx = -1;
     applyBiome(data.biome);
@@ -13044,10 +14487,25 @@ function _meLoadMap(data) {
       staticObstacles.push({ x: item.col, z: item.row, r: 0.18 });
     }
     else if (item.type === 'well') group = buildWell(item.col, item.row, _meSeededRng(item.seed));
+    else if (item.type && item.type.startsWith('custom:')) {
+      const objData = _meGetStudioObject(item.type.slice(7));
+      if (objData) {
+        group = buildStudioObjectGroup(objData, item.col, item.row);
+        staticObstacles.push({ x: item.col, z: item.row, r: 0.4 });
+        if (cell.type === 'grass') cell.type = 'scenery';
+      }
+    }
     if (group) { group.userData.meItem = true; _meItems.push({ ...item, group }); }
   }
   // Rebuild path lanterns (Clear All removed them)
   buildPathLanterns();
+  // Restore the cosmetic border-mountain backdrop that _meClearAll dropped. These
+  // ranges sit entirely outside the playable grid, so they never touch the author's
+  // layout or paths — a loaded map without them just looks flat at the horizon.
+  // (Interior outcrops stay author-controlled: custom maps show only placed items,
+  // same as trees/rocks, so we intentionally don't regenerate them here.)
+  _mountainsActive = true;
+  buildBorderMountains();
   _meLoadedName = data.name;
   _meNameInput.value = data.name;
 }
@@ -13072,15 +14530,21 @@ function _meRefreshMapList() {
     row.className = 'me-map-entry';
     const loadBtn = document.createElement('button');
     loadBtn.className = 'me-map-load-btn' + (map.name === _meLoadedName ? ' active' : '');
-    loadBtn.textContent = map.name;
-    loadBtn.title = `Biome: ${BIOMES[map.biome]?.name ?? '?'} · ${map.items.length} objects`;
+    loadBtn.textContent = map.name + (map.bestWave ? ` · 🏆${map.bestWave}` : '');
+    loadBtn.title = `Biome: ${BIOMES[map.biome]?.name ?? '?'} · ${map.items.length} objects${map.bestWave ? ` · best: wave ${map.bestWave}` : ''}`;
     loadBtn.addEventListener('click', () => { _meLoadMap(map); _meRefreshMapList(); });
+    // ▶ Quick-play: load the map and jump straight into test-play
+    const playBtn = document.createElement('button');
+    playBtn.className = 'me-map-play-btn';
+    playBtn.textContent = '▶';
+    playBtn.title = 'Play this map';
+    playBtn.addEventListener('click', () => { _meLoadMap(map); _mePlayingMapName = map.name; _meStartPlay(); });
     const delBtn = document.createElement('button');
     delBtn.className = 'me-map-del-btn';
     delBtn.textContent = '✕';
-    delBtn.title = 'Delete map';
-    delBtn.addEventListener('click', () => _meDeleteMap(map.name));
-    row.appendChild(loadBtn); row.appendChild(delBtn);
+    delBtn.title = 'Delete map (click twice)';
+    delBtn.addEventListener('click', (e) => _meArmConfirm(e.currentTarget, () => _meDeleteMap(map.name)));
+    row.appendChild(loadBtn); row.appendChild(playBtn); row.appendChild(delBtn);
     _meMapList.appendChild(row);
   }
 }
@@ -13097,8 +14561,12 @@ function _meSetTool(tool) {
 
 function enterMapEditorMode() {
   if (studioMode) exitStudio();
+  _mePlayingMapName = null; // back in the editor — not in a custom-map play session
   mapEditorMode = true;
-  _meUndoStack.length = 0; // fresh undo stack each session
+  _meUndoStack.length = 0; // fresh undo/redo stacks each session
+  _meRedoStack.length = 0;
+  const _retBtn = document.getElementById('me-return-btn');
+  if (_retBtn) _retBtn.style.display = 'none';
   document.getElementById('hud').style.display = 'none';
   document.getElementById('build-panel').style.display = 'none';
   document.getElementById('scroll-hint').style.display = 'none';
@@ -13112,6 +14580,25 @@ function enterMapEditorMode() {
   const _sm = loadSave('td_saved_maps', null);
   if (Array.isArray(_sm)) _meSavedMaps = _sm;
   _meRefreshMapList();
+  // Custom (studio-built) object tools — rebuilt each entry, library may have changed
+  const customGrid = document.getElementById('me-custom-grid');
+  if (customGrid) {
+    customGrid.innerHTML = '';
+    const lib = loadSave('td_studio_objects', null);
+    if (!Array.isArray(lib) || !lib.length) {
+      customGrid.innerHTML = '<div style="font-size:10px;color:rgba(0,180,220,0.45);padding:2px 0;line-height:1.4">Build objects in the Studio (ESC menu) — they become placeable here</div>';
+    } else {
+      lib.forEach(o => {
+        const btn = document.createElement('button');
+        btn.className = 'me-tool-btn';
+        btn.dataset.meTool = 'custom:' + o.name;
+        btn.textContent = '📦 ' + o.name;
+        btn.title = `${o.parts?.length ?? 0} part(s) — built in Studio`;
+        btn.addEventListener('click', () => _meSetTool('custom:' + o.name));
+        customGrid.appendChild(btn);
+      });
+    }
+  }
   // Biome buttons
   const biomeGrid = document.getElementById('me-biome-grid');
   if (!biomeGrid.children.length) {
@@ -13128,7 +14615,7 @@ function enterMapEditorMode() {
       biomeGrid.appendChild(btn);
     });
   }
-  showTooltip('Map Editor — drag-paint tiles · right-click erases · Ctrl+Z undo · G/D/S/W/L T R E hotkeys · P test play', 5500);
+  showTooltip('Map Editor — drag-paint tiles · right-click erases · Ctrl+Z / Ctrl+Y undo-redo · paths auto-connect · P test play', 5500);
 }
 
 function exitMapEditorMode() {
@@ -13158,9 +14645,33 @@ document.getElementById('me-save-btn').addEventListener('click', () => {
   showTooltip('Map saved!', 1500);
 });
 
-document.getElementById('me-clear-btn').addEventListener('click', () => {
-  _meClearAll();
-  showTooltip('Cleared everything — only castle and path tiles remain', 1800);
+// Two-click confirm for destructive buttons: first click arms ("Sure?"), a second
+// click within 2.5s fires. Less jarring than a modal, but stops fatal misclicks.
+function _meArmConfirm(btn, run) {
+  if (btn.dataset.armed) {
+    clearTimeout(+btn.dataset.armT);
+    delete btn.dataset.armed;
+    btn.textContent = btn.dataset.origLabel;
+    btn.classList.remove('me-armed');
+    run();
+    return;
+  }
+  btn.dataset.origLabel = btn.textContent;
+  btn.dataset.armed = '1';
+  btn.classList.add('me-armed');
+  btn.textContent = '⚠ Sure?';
+  btn.dataset.armT = setTimeout(() => {
+    delete btn.dataset.armed;
+    btn.textContent = btn.dataset.origLabel;
+    btn.classList.remove('me-armed');
+  }, 2500);
+}
+
+document.getElementById('me-clear-btn').addEventListener('click', (e) => {
+  _meArmConfirm(e.currentTarget, () => {
+    _meClearAll();
+    showTooltip('Cleared everything — only castle and path tiles remain', 1800);
+  });
 });
 
 document.getElementById('me-exit-btn').addEventListener('click', () => exitMapEditorMode());
@@ -13168,7 +14679,11 @@ document.getElementById('me-exit-btn').addEventListener('click', () => exitMapEd
 // Test-play: drop the player into the current map at wave 1 with starter gold.
 // We don't run a full level — this is a sandbox test of the layout. Player can
 // return to the editor via the ESC menu.
-document.getElementById('me-play-btn')?.addEventListener('click', () => {
+// Launch test-play on whatever map is currently in the editor. Shared by the
+// panel "Test Play" button and the per-saved-map ▶ quick-play button.
+function _meStartPlay() {
+  // Pre-flight path check BEFORE leaving the editor so the author sees problems
+  const v = _meValidatePaths();
   exitMapEditorMode();
   _resetRunState();
   // Pre-seed all unlocks so the player can test all tools on their custom map
@@ -13178,10 +14693,43 @@ document.getElementById('me-play-btn')?.addEventListener('click', () => {
   gold = 200;
   updateHUD();
   if (gameSpeed === 0) gameSpeed = 1;
-  showTooltip('Test Play — your custom map • press Start to launch wave 1', 3500);
+  // Floating "Back to Editor" button — the return path used to be buried in the ESC menu
+  const retBtn = document.getElementById('me-return-btn');
+  if (retBtn) retBtn.style.display = 'block';
+  const bestNote = _mePlayingMapName
+    ? (() => { const m = _meSavedMaps.find(x => x.name === _mePlayingMapName); return m?.bestWave ? `  ·  best: wave ${m.bestWave}` : ''; })()
+    : '';
+  if (!v.any) {
+    showTooltip(`Test Play — no custom paths drawn, using the default roads • press Start${bestNote}`, 4000);
+  } else if (v.warnings.length) {
+    const shown = v.warnings.slice(0, 2).join(' · ');
+    showTooltip(`⚠ ${shown}${v.warnings.length > 2 ? ` (+${v.warnings.length - 2} more)` : ''} — starting anyway`, 5000);
+  } else {
+    showTooltip(`Test Play — ${_mePlayingMapName ? `"${_mePlayingMapName}"` : 'your custom map'} • press Start to launch wave 1${bestNote}`, 3500);
+  }
+}
+document.getElementById('me-play-btn')?.addEventListener('click', () => {
+  _mePlayingMapName = null; // panel Test Play = the working map, not a named save
+  _meStartPlay();
+});
+
+// Return from test play straight back into the editor (map state survives the trip)
+document.getElementById('me-return-btn')?.addEventListener('click', () => {
+  document.getElementById('me-return-btn').style.display = 'none';
+  window._switchToMode('map');
 });
 
 document.getElementById('me-undo-btn')?.addEventListener('click', () => _meUndo());
+document.getElementById('me-redo-btn')?.addEventListener('click', () => _meRedo());
+
+// Brush size buttons (1×1 / 2×2 / 3×3 — applies to plain tiles and erase)
+document.querySelectorAll('.me-brush-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _meBrushSize = parseInt(btn.dataset.brush) || 1;
+    document.querySelectorAll('.me-brush-btn').forEach(b =>
+      b.classList.toggle('active', parseInt(b.dataset.brush) === _meBrushSize));
+  });
+});
 
 document.getElementById('me-export-btn').addEventListener('click', () => {
   if (_meSavedMaps.length === 0) { showTooltip('No saved maps to export', 1800); return; }
@@ -13275,9 +14823,14 @@ function _spawnArenaEnemy(type, col) {
   PATHS[0] = saved[0]; PATHS[1] = saved[1]; PATHS[2] = saved[2];
   const o = orcs[orcs.length - 1];
   if (!o) return;
-  o.pathIndex = 0;
+  // Stagger for real: arena lanes are straight 1-tile steps (path index ==
+  // column), so aligning pathIndex to the requested column actually places the
+  // enemy there. The old teleport (position.x = col with pathIndex 0) was
+  // undone one frame later by the path-interpolation snap, so every enemy
+  // silently started at column 0 regardless of the requested stagger.
+  o.pathIndex = Math.max(0, Math.min(lanePath.length - 2, Math.round(col)));
   o.progress  = 0;
-  o.group.position.x = col;
+  o.group.position.x = lanePath[o.pathIndex][0];
   o.group.position.z = laneRow;
 }
 
@@ -13469,7 +15022,7 @@ function _buildFormation(type, count, centerCol) {
  * then fewer escaped, then more HP remaining, then lower cost.
  */
 function _cmpOutcome(a, b) {
-  const score = { WIN: 3, PARTIAL: 1, LOSS: 0 };
+  const score = { WIN: 3, PARTIAL: 1, LOSS: 0, TIMEOUT: -1 };
   const dv = (score[b.verdict] ?? 0) - (score[a.verdict] ?? 0);
   if (dv !== 0) return dv;
   const de = a.escaped - b.escaped;
@@ -13697,6 +15250,8 @@ function _cmpOutcome(a, b) {
   document.getElementById('bal-run-btn')?.addEventListener('click', () => _runBalanceCheck());
 
   // ── Stat Tweaker controls ─────────────────────────────────────────────────
+  _ensureOrigCFG();
+  _applySavedTweaks();
   _buildStatTweaker();
 
   const _tweakerBody   = document.getElementById('tweaker-body');
@@ -13728,6 +15283,7 @@ function _cmpOutcome(a, b) {
         if (typeof CFG.ORC_TYPES[type]?.[k] === 'number') CFG.ORC_TYPES[type][k] = v;
       }
     }
+    try { localStorage.removeItem('td_stat_tweaks'); } catch {} // clear persisted tweaks too
     _buildStatTweaker();
     showTooltip('Stats reset to defaults', 1500);
   });
@@ -13844,11 +15400,11 @@ function _cmpOutcome(a, b) {
       code: `// 3-lane optimizer vs wave 10\nTEST.lanes(3);\nawait TEST.optimizeWave(10, {\n  budget:400, speed:3, timeout:25,\n  testCols:[32,37,42,47]\n});` },
     // ── Wave-simulation presets (use real buildSpawnQueue compositions) ──
     { label: 'Wave 5  (3 lanes)',
-      code: `// Real wave 5 composition across 3 lanes\nTEST.lanes(3);\nplace('wall',36,22); place('wall',36,27); place('wall',36,32);\nplace('tower',38,22); place('tower',38,27); place('tower',38,32);\nplace('archer',40,22); place('archer',40,27); place('archer',40,32);\nawait TEST.wave(5, { speed:2, timeout:50 });` },
+      code: `// Real wave 5 composition across 3 lanes\n// (lanes sit on rows 22/27/32 — walls block ON the lanes, units flank them)\nTEST.lanes(3);\nplace('wall',36,22); place('wall',36,27); place('wall',36,32);\nplace('tower',38,21); place('tower',38,26); place('tower',38,31);\nplace('archer',40,23); place('archer',40,28); place('archer',40,33);\nawait TEST.wave(5, { speed:2, timeout:50 });` },
     { label: 'Wave 10 (3 lanes)',
-      code: `// Real wave 10 — full elite mix across 3 lanes\nTEST.lanes(3);\nplace('wall',34,22); place('wall',34,27); place('wall',34,32);\nplace('tower',36,22); place('tower',36,27); place('tower',36,32);\nplace('archer',38,22); place('archer',38,27); place('archer',38,32);\nplace('knight',40,22); place('knight',40,27); place('knight',40,32);\nawait TEST.wave(10, { speed:2, timeout:70 });` },
+      code: `// Real wave 10 — full elite mix across 3 lanes\n// (lanes sit on rows 22/27/32 — walls block ON the lanes, units flank them)\nTEST.lanes(3);\nplace('wall',34,22); place('wall',34,27); place('wall',34,32);\nplace('tower',36,21); place('tower',36,26); place('tower',36,31);\nplace('archer',38,23); place('archer',38,28); place('archer',38,33);\nplace('knight',40,21); place('knight',40,26); place('knight',40,31);\nawait TEST.wave(10, { speed:2, timeout:70 });` },
     { label: '3-Lane Sweep',
-      code: `// Compare single-lane vs 3-lane with same defenders\nTEST.lanes(1);\nawait TEST.battle({ label:'1-lane', defenders:[['tower',38,26],['archer',40,26],['knight',42,26]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });\nawait _testWait(1200);\nTEST.lanes(3);\nawait TEST.battle({ label:'3-lane', defenders:[['tower',38,22],['tower',38,27],['tower',38,32],['archer',40,22],['archer',40,27],['archer',40,32]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });` },
+      code: `// Compare single-lane vs 3-lane with same defenders\nTEST.lanes(1);\nawait TEST.battle({ label:'1-lane', defenders:[['tower',38,26],['archer',40,26],['knight',42,26]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });\nawait _testWait(1200);\nTEST.lanes(3);\nawait TEST.battle({ label:'3-lane', defenders:[['tower',38,21],['tower',38,26],['tower',38,31],['archer',40,23],['archer',40,28],['archer',40,33]], enemies:[['grunt',8],['brute',4],['wolf',4]], speed:2, timeout:30 });` },
   ];
 
   for (const p of SCRIPT_PRESETS) {
@@ -13977,7 +15533,11 @@ function _cmpOutcome(a, b) {
     }, 0) + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
     const totalStartHp = defenders.reduce((sum, d) => sum + (_bs.defHpAtStart.get(d) ?? d.maxHp), 0)
       + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
-    const verdict = escaped === 0 ? 'WIN' : killed === 0 ? 'LOSS' : 'PARTIAL';
+    // TIMEOUT: enemies spawned but none resolved (killed or escaped) — the battle
+    // stalled (e.g. rare arena warm-up race right after page load). Without this
+    // a stalled battle reads as a flawless WIN and poisons sweep/optimizer rankings.
+    const verdict = (spawned > 0 && killed === 0 && escaped === 0) ? 'TIMEOUT'
+      : escaped === 0 ? 'WIN' : killed === 0 ? 'LOSS' : 'PARTIAL';
 
     // Per-defender snapshot: merge live defenders with killed ones (which are
     // spliced from the array after their death animation finishes)
@@ -14105,6 +15665,41 @@ function _cmpOutcome(a, b) {
     };
   }
 
+  // ── Tweak persistence: only the DIFFS vs the shipped defaults are stored,
+  // so a game-balance update in a new build wins wherever the player didn't
+  // explicitly tweak that exact stat.
+  function _saveTweaks() {
+    if (!_origCFG) return;
+    const diff = { STATS: {}, ORC_TYPES: {} };
+    for (const [grp, cfg, orig] of [['STATS', CFG.STATS, _origCFG.STATS], ['ORC_TYPES', CFG.ORC_TYPES, _origCFG.ORC_TYPES]]) {
+      for (const [type, stats] of Object.entries(cfg)) {
+        for (const [k, v] of Object.entries(stats)) {
+          if (typeof v === 'number' && typeof orig[type]?.[k] === 'number' && Math.abs(v - orig[type][k]) > 0.0001) {
+            (diff[grp][type] = diff[grp][type] || {})[k] = v;
+          }
+        }
+      }
+    }
+    if (!Object.keys(diff.STATS).length && !Object.keys(diff.ORC_TYPES).length) {
+      try { localStorage.removeItem('td_stat_tweaks'); } catch {}
+    } else {
+      saveSave('td_stat_tweaks', diff);
+    }
+  }
+  function _applySavedTweaks() {
+    const t = loadSave('td_stat_tweaks', null);
+    if (!t) return;
+    let applied = 0;
+    for (const [grp, cfg] of [['STATS', CFG.STATS], ['ORC_TYPES', CFG.ORC_TYPES]]) {
+      for (const [type, stats] of Object.entries(t[grp] || {})) {
+        for (const [k, v] of Object.entries(stats)) {
+          if (typeof cfg[type]?.[k] === 'number' && typeof v === 'number') { cfg[type][k] = v; applied++; }
+        }
+      }
+    }
+    if (applied) showTooltip(`🔧 ${applied} saved stat tweak${applied > 1 ? 's' : ''} applied (Test Arena → Reset to clear)`, 3500);
+  }
+
   /** Build/rebuild the stat tweaker panel from current CFG values */
   function _buildStatTweaker() {
     _ensureOrigCFG();
@@ -14167,6 +15762,7 @@ function _cmpOutcome(a, b) {
           }
         }
         refresh();
+        _saveTweaks(); // persist so balance experiments survive reloads
       }
       minus.addEventListener('click', () => adjust(-step));
       plus.addEventListener('click',  () => adjust( step));
@@ -14285,6 +15881,32 @@ function _cmpOutcome(a, b) {
     _balRunning = false;
   }
 
+  // Dev hook: expose core render objects so the headless test harness can drive
+  // the camera for close-up model inspection (companion to window.TEST).
+  window._DEV = {
+    scene, camera, controls, THREE,
+    get orcs() { return orcs; },
+    get defenders() { return defenders; },
+    sellAllOfType,
+    waveModifierFor,
+    get waveMod() { return _waveMod; },
+    forceWaveMod(id) { _waveMod = WAVE_MODIFIERS.find(m => m.id === id) || null; return _waveMod; },
+    // Map-editor internals for automated editor testing
+    me: {
+      setTool: _meSetTool,
+      apply: _meApplyTool,
+      undo: _meUndo,
+      redo: _meRedo,
+      validate: _meValidatePaths,
+      order: _meOrderPathTiles,
+      setBrush: (n) => { _meBrushSize = n; },
+      get paths() { return _mePaths; },
+      get gamePaths() { return PATHS; },
+      get overrides() { return _meTileOverrides; },
+      get items() { return _meItems; },
+    },
+  };
+
   // Expose global TEST API for browser console and terminal-driven scripts
   window.TEST = {
     /** Run a script string. Auto-enters test mode if needed. */
@@ -14381,7 +16003,9 @@ function _cmpOutcome(a, b) {
         const [, count = 1] = Array.isArray(e) ? e : [e, 1];
         return s + count;
       }, 0);
-      const totalSpawned = Math.min(totalSpawnedRaw, 22);
+      // Cap must match ARENA_SPAWN_CAP (22 per lane) — a flat 22 made multi-lane
+      // battles resolve as soon as the first 22 enemies finished, ignoring the rest.
+      const totalSpawned = Math.min(totalSpawnedRaw, 22 * _arenaLanes);
 
       // Spawn enemies with column stagger — cap scales with lane count (22 per lane)
       // so multi-lane battles can handle full wave compositions without truncation.
@@ -15045,7 +16669,14 @@ function _cmpOutcome(a, b) {
   function _dismissAllOverlays() {
     document.getElementById('wave-banner').classList.remove('visible');
     document.getElementById('wave-stars').classList.remove('visible');
-    document.getElementById('merchant').classList.remove('visible');
+    const merchantEl = document.getElementById('merchant');
+    if (merchantEl.classList.contains('visible')) {
+      merchantEl.classList.remove('visible');
+      // The merchant disables Start while it is up. Force-closing it here must
+      // re-enable the button, or the run soft-locks: enter test mode while the
+      // merchant was open and Start stayed dead for the rest of the session.
+      if (!gameOver) elBtnStart.disabled = false;
+    }
     document.getElementById('game-over').classList.remove('visible');
     elLastStand?.classList.remove('active');
     elLastStandTimer?.classList.remove('active');
@@ -15061,11 +16692,24 @@ function _cmpOutcome(a, b) {
     _modeTransEl.classList.add('fading');
     setTimeout(() => {
       fn();
-      // Two rAF so the browser has painted the new scene before fading back in
-      requestAnimationFrame(() => requestAnimationFrame(() => {
+      let _done = false;
+      const finish = () => {
+        if (_done) return;
+        _done = true;
         _modeTransEl.classList.remove('fading');
         _modeFlashing = false;
-      }));
+      };
+      // Two rAF so the browser has painted the new scene before fading back in.
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+      // Fallback — rAF is NOT guaranteed to run here, and the `_modeFlashing` latch
+      // above silently drops every later mode switch until it clears. fn() may be
+      // enterTestMode(), which deliberately cancels the rAF game loop and drives the
+      // game from a MessageChannel instead so it keeps ticking in a background tab;
+      // a hidden/throttled tab also suspends rAF. With nothing else requesting frames
+      // the latch stuck, and the next "Return to Game" / ESC-menu mode switch did
+      // nothing at all — the player had to press it twice. Measured still latched
+      // 1.5 s after entering the test arena.
+      setTimeout(finish, 400);
     }, 210);
   }
 
@@ -15143,6 +16787,11 @@ function _cmpOutcome(a, b) {
     testMode = false;
     _mcTickEnabled = false; // stop MessageChannel ticker
     _gameLoopRafId = requestAnimationFrame(gameLoop); // restart rAF chain
+    // Test-arena speeds (0×–8× via slider/presets/TEST.battle) must not leak into
+    // the normal game, which only knows 0/1/2 — reset to 1× and sync the buttons.
+    gameSpeed = 1;
+    if (elBtnPause) elBtnPause.textContent = '⏸ Pause';
+    if (elBtnSpeed) elBtnSpeed.textContent = '⏩ 2×';
     castleSceneActive = false;
     _arenaLanes = 1;
     _arenaLanePaths = [];
@@ -15180,6 +16829,17 @@ function _cmpOutcome(a, b) {
     camera.position.set(32, 38, 68);
     controls.update();
 
+    // Re-arm Start. enterTestMode force-ends whatever wave was running (it clears
+    // waveActive, spawnQueue and every live orc), so checkWaveEnd — the only thing
+    // that normally re-enables this button — can never fire for that wave: it returns
+    // immediately on `if (!waveActive)`. Start was disabled by the click that launched
+    // the wave and nothing here undid it, so entering the test arena mid-wave and
+    // coming back left the run permanently unable to start another wave. Verified: 0
+    // orcs, no merchant, not game over, Start still disabled 19 s later.
+    // (_dismissAllOverlays above already closed the merchant, which is the only other
+    // legitimate reason for this button to be disabled.)
+    if (!gameOver) elBtnStart.disabled = false;
+
     showTooltip('Returned to normal game', 1500);
   }
 
@@ -15204,6 +16864,13 @@ function _cmpOutcome(a, b) {
     // Use flash transition whenever test mode is entering or leaving
     const needsFlash = testMode || isTest;
     const doSwitch = () => {
+      // The first-session onboarding card is only guarded when it FIRES; once up,
+      // nothing hid it, so switching into a special mode stranded it over that
+      // mode's UI. Dismiss it on any switch into test/studio/map.
+      if (isTest || isStudio || isMap) {
+        const obEl = document.getElementById('onboard-card');
+        if (obEl) obEl.style.display = 'none';
+      }
       if (testMode)        exitTestMode();
       else if (studioMode) exitStudio();
       else if (mapEditorMode) exitMapEditorMode();
@@ -15211,6 +16878,13 @@ function _cmpOutcome(a, b) {
       else if (isStudio) enterStudio();
       else if (isMap)    enterMapEditorMode();
       // 'game' = just exit current mode (already done above)
+      // A finished run's game-over screen must not sit on top of a special mode
+      // (test mode dismisses it via _dismissAllOverlays; studio/map here) — and
+      // returning to the game must bring it back, or the dead run is left with
+      // no Retry path: Start stays disabled and the field is frozen.
+      const goEl = document.getElementById('game-over');
+      if (isStudio || isMap) goEl.classList.remove('visible');
+      else if (!isTest && gameOver) goEl.classList.add('visible');
     };
     if (needsFlash) _modeFlash(doSwitch);
     else            doSwitch();
@@ -15320,17 +16994,25 @@ document.getElementById('esc-test').addEventListener('click', () => {
 });
 
 // ── DIFFICULTY MODE ───────────────────────────────────────────────────
+// Routes through the SAME path as the level-select pill (currentDifficulty +
+// applyDifficulty + saveDifficulty). The old handler set stale hardcoded
+// multipliers directly, skipped rewardMult/persistence/HUD, and desynced the
+// difficulty that records (best times, endless bests) are keyed under.
 document.querySelectorAll('.diff-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
     const d = btn.dataset.diff;
-    if (d === 'easy')   { difficultyMult = { hp: 0.7, speed: 0.85 }; showTooltip('Easy mode — enemies are weaker', 2000); }
-    else if (d === 'hard') { difficultyMult = { hp: 1.4, speed: 1.2 };  showTooltip('Hard mode — enemies are tougher & faster!', 2000); }
-    else                { difficultyMult = { hp: 1.0, speed: 1.0 };  showTooltip('Normal mode', 1500); }
+    if (!DIFFICULTY_PRESETS[d]) return;
+    currentDifficulty = d;
+    applyDifficulty();
+    saveDifficulty();
+    document.querySelectorAll('.diff-btn').forEach(b => b.classList.toggle('active', b.dataset.diff === d));
+    const p = DIFFICULTY_PRESETS[d];
+    showTooltip(`${p.icon} ${p.label} mode — applies to newly spawned enemies`, 2000);
     _closeEscMenu();
   });
 });
+// Keep the esc-menu buttons in sync with the persisted difficulty at load
+document.querySelectorAll('.diff-btn').forEach(b => b.classList.toggle('active', b.dataset.diff === currentDifficulty));
 
 // ── SETTINGS (volume sliders) ─────────────────────────────────────────
 (function _initSettings() {
@@ -15344,37 +17026,85 @@ document.querySelectorAll('.diff-btn').forEach(btn => {
   }
   const sfxDef   = saved.sfx   != null ? saved.sfx   : 32;
   const musicDef = saved.music > 0     ? saved.music : 40;
+  let sfxMuted   = !!saved.sfxMuted;
+  let musicMuted = !!saved.musicMuted;
 
   const sfxSlider   = document.getElementById('sfx-slider');
   const musicSlider = document.getElementById('music-slider');
   const sfxValEl    = document.getElementById('sfx-val');
   const musicValEl  = document.getElementById('music-val');
+  const sfxMuteBtn   = document.getElementById('sfx-mute');
+  const musicMuteBtn = document.getElementById('music-mute');
 
   sfxSlider.value   = sfxDef;
   musicSlider.value = musicDef;
   sfxValEl.textContent   = sfxDef;
   musicValEl.textContent = musicDef;
 
-  SND.setSfxVol(sfxDef / 100);
-  SND.setMusicVol(musicDef / 100);
-
   function _save() {
     saveSave('td_settings', {
       sfx:   +sfxSlider.value,
       music: +musicSlider.value,
+      sfxMuted, musicMuted,
+      bloom: bloomEnabled,
     });
   }
 
+  // Mute is a layer on top of the sliders: the slider keeps its value, mute
+  // just gates the output, so unmuting restores the exact previous volume.
+  function _applyVolumes() {
+    SND.setSfxVol(sfxMuted ? 0 : sfxSlider.value / 100);
+    SND.setMusicVol(musicMuted ? 0 : musicSlider.value / 100);
+    if (sfxMuteBtn) {
+      sfxMuteBtn.textContent = sfxMuted ? '🔇' : '🔊';
+      sfxMuteBtn.classList.toggle('muted', sfxMuted);
+    }
+    if (musicMuteBtn) {
+      musicMuteBtn.textContent = musicMuted ? '🔇' : '🎵';
+      musicMuteBtn.classList.toggle('muted', musicMuted);
+    }
+  }
+  _applyVolumes();
+
   sfxSlider.addEventListener('input', () => {
     sfxValEl.textContent = sfxSlider.value;
-    SND.setSfxVol(sfxSlider.value / 100);
+    if (+sfxSlider.value > 0) sfxMuted = false; // dragging the slider implies "I want sound"
+    _applyVolumes();
     _save();
   });
   musicSlider.addEventListener('input', () => {
     musicValEl.textContent = musicSlider.value;
-    SND.setMusicVol(musicSlider.value / 100);
+    if (+musicSlider.value > 0) musicMuted = false;
+    _applyVolumes();
     _save();
   });
+  sfxMuteBtn?.addEventListener('click', () => { sfxMuted = !sfxMuted; _applyVolumes(); _save(); });
+  musicMuteBtn?.addEventListener('click', () => { musicMuted = !musicMuted; _applyVolumes(); _save(); });
+
+  // ── Glow FX (bloom) toggle — module-scoped bloomEnabled drives the render path ──
+  const bloomBtn = document.getElementById('bloom-toggle');
+  const bloomVal = document.getElementById('bloom-val');
+  bloomEnabled = saved.bloom !== false; // default ON
+  function _applyBloomUI() {
+    if (bloomVal) bloomVal.textContent = bloomEnabled ? 'On' : 'Off';
+    bloomBtn?.classList.toggle('muted', !bloomEnabled);
+  }
+  _applyBloomUI();
+  bloomBtn?.addEventListener('click', () => {
+    bloomEnabled = !bloomEnabled;
+    _applyBloomUI();
+    _save();
+  });
+
+  // Global mute hotkey: M toggles everything at once. Exposed for the keydown
+  // handler (which lives outside this closure and filters out typing contexts).
+  window._toggleGlobalMute = () => {
+    const anyOn = !sfxMuted || !musicMuted;
+    sfxMuted = musicMuted = anyOn; // if anything is audible → mute all; else unmute all
+    _applyVolumes();
+    _save();
+    showTooltip(anyOn ? '🔇 Muted — press M to unmute' : '🔊 Sound on', 1600);
+  };
 
   // Start music / unlock AudioContext on first user interaction
   // Uses a repeating listener until the context is confirmed running (handles the case
@@ -15406,13 +17136,18 @@ elBtnStart.addEventListener('click', () => {
   }
   // Inside a level, the layout + biome are fixed (set in startLevel). Only rotate
   // when playing endless/no-level mode, so level themes don't get overwritten.
+  // layoutChanged/biomeChanged stay false in level mode — they're read again at the
+  // bottom of startWave for the banner tooltip (referencing them there used to throw:
+  // they were block-scoped to this if, killing the tail of every wave start).
   const inLevelNonEndless = currentLevel && currentLevel.id !== 'endless';
+  let layoutIdx = activeLayoutIdx, biomeIdx = activeBiomeIdx;
+  let layoutChanged = false, biomeChanged = false;
   if (!inLevelNonEndless) {
     // Waves 1-3: Blitz (short paths, fast action). Wave 4+: cycle through longer layouts.
-    const layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
-    const biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
-    const layoutChanged = layoutIdx !== activeLayoutIdx;
-    const biomeChanged  = biomeIdx  !== activeBiomeIdx;
+    layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
+    biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
+    layoutChanged = layoutIdx !== activeLayoutIdx;
+    biomeChanged  = biomeIdx  !== activeBiomeIdx;
     const hasEditorPaths = _mePaths.some(p => p.length > 0);
     if (layoutChanged && !hasEditorPaths) {
       applyLayout(layoutIdx);
@@ -15425,6 +17160,8 @@ elBtnStart.addEventListener('click', () => {
     // layout-derived song override it. setSong is idempotent so this is a cheap no-op.
     SND.setSong(LEVEL_SONGS[currentLevel.id] || 'classic');
   }
+  // Endless wave modifier: rolled deterministically per wave (null in story levels)
+  _waveMod = waveModifierFor(wave);
   spawnQueue = buildSpawnQueue(wave);
   // Feature 5: siege wave — add 40% more enemies
   const isSiegeWave = wave % 5 === 0;
@@ -15475,6 +17212,7 @@ elBtnStart.addEventListener('click', () => {
   _criticalWarned = false;
   // Endless mode: reaching wave 20 unlocks "Eternal Defender"
   if (currentLevel?.id === 'endless' && wave >= 20) _unlockAchievement('endlessWave20');
+  if (currentLevel?.id === 'endless' && wave >= 30) _unlockAchievement('endlessWave30');
   waveStartHp   = castleHp;
   waveDefDeaths = 0;
   waveStartTime = Date.now();
@@ -15554,6 +17292,8 @@ window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+      bloomPass.setSize(window.innerWidth, window.innerHeight);
     });
   }, 80);
 });
@@ -15588,9 +17328,13 @@ loadAchievements();
 loadDifficulty();
 {
   const urlParams = new URLSearchParams(window.location.search);
-  const skipMenu = urlParams.has('test') || urlParams.has('studio') || urlParams.has('map') || urlParams.has('nomenu');
+  const skipMenu = urlParams.has('test') || urlParams.has('studio') || urlParams.has('map') || urlParams.has('nomenu') || urlParams.has('headless');
   if (skipMenu) {
     showTooltip('3 roads! Place Walls on roads to block enemies — they\'ll fight through!', 6000);
+    // ?studio / ?map / ?test previously only skipped the menu — actually enter the mode
+    if      (urlParams.has('studio')) window._switchToMode('studio');
+    else if (urlParams.has('map'))    window._switchToMode('map');
+    else if (urlParams.has('test'))   window._switchToMode('test');
   } else {
     showLevelSelect();
   }

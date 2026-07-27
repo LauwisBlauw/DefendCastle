@@ -17,6 +17,13 @@ const slim = r => ({
   killEff: r.killEfficiency, time: r.duration + 's',
 });
 
+// ── 0. Warm-up ────────────────────────────────────────────────────────────────
+//  The very first battle after a page load can stall (arena warm-up race:
+//  enemies spawn but never path; reported as TIMEOUT). Run a throwaway
+//  skirmish so the real matrix starts from a warmed, known-good state.
+console.log('[DIAG] Warm-up battle (discarded)…');
+await TEST.battle({ label: 'warmup', defenders: [], enemies: [['grunt', 1]], speed: SPEED, timeout: 10 });
+
 // ── 1. Individual matchup matrix ─────────────────────────────────────────────
 //  Each defender type (1 unit, row 26) vs key threats.
 //  Reveals which units are unviable or overtuned for specific enemies.
@@ -69,11 +76,14 @@ report.sections.weakness_scan = {
 //  Defenders cover all three lanes; enemies use the full buildSpawnQueue compositions.
 //  Defenders persist across waves — tests attrition and difficulty curve.
 TEST.lanes(3);
+// 3-lane rows are 22/27/32 (the paths themselves). Walls go ON the lanes as
+// blockers; everything else must FLANK the lanes — non-wall defenders can't be
+// placed on path tiles, so the old on-lane rows silently placed only the walls.
 const STD_DEF_3LANE = [
   ['wall',   36, 22], ['wall',   36, 27], ['wall',   36, 32],
-  ['tower',  38, 22], ['tower',  38, 27], ['tower',  38, 32],
-  ['archer', 40, 22], ['archer', 40, 27], ['archer', 40, 32],
-  ['knight', 42, 22], ['knight', 42, 32],
+  ['tower',  38, 21], ['tower',  38, 26], ['tower',  38, 31],
+  ['archer', 40, 23], ['archer', 40, 28], ['archer', 40, 33],
+  ['knight', 42, 21], ['knight', 42, 31],
 ];
 console.log('[DIAG] Section 3/4: 3-lane wave simulation (waves 3, 6, 10, 14)…');
 const waveResults = await TEST.multiWave(STD_DEF_3LANE, [3, 6, 10, 14], { speed: SPEED, timeout: 70 });
