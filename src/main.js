@@ -16864,6 +16864,13 @@ function _cmpOutcome(a, b) {
     // Use flash transition whenever test mode is entering or leaving
     const needsFlash = testMode || isTest;
     const doSwitch = () => {
+      // The first-session onboarding card is only guarded when it FIRES; once up,
+      // nothing hid it, so switching into a special mode stranded it over that
+      // mode's UI. Dismiss it on any switch into test/studio/map.
+      if (isTest || isStudio || isMap) {
+        const obEl = document.getElementById('onboard-card');
+        if (obEl) obEl.style.display = 'none';
+      }
       if (testMode)        exitTestMode();
       else if (studioMode) exitStudio();
       else if (mapEditorMode) exitMapEditorMode();
