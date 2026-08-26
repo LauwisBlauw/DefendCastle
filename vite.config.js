@@ -9,6 +9,30 @@ let lastResult = null;
 // Accumulating history of the last 50 results
 const resultHistory = [];
 
+// These endpoints hand arbitrary JavaScript to every connected browser tab, so any
+// page that can reach them gets code execution in the game tab. CORS response
+// headers do NOT protect against that: a "simple" cross-origin POST (text/plain
+// body, no preflight) is delivered and acted on before the browser ever decides
+// whether the attacker may read the reply. The side effect has already happened.
+//
+// So gate on the Origin header instead. Browsers always attach it to cross-origin
+// requests — including ones aimed at localhost from a random site the user has
+// open, and including DNS-rebinding attempts, which still carry the attacker's
+// origin. Non-browser clients (curl, scripts/run-diagnostic.sh) send no Origin at
+// all, so the terminal workflow keeps working untouched.
+function rejectCrossOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) return false;                       // curl / CLI — allow
+  let originHost = null;
+  try { originHost = new URL(origin).host; } catch { /* malformed → reject */ }
+  if (originHost && originHost === req.headers.host) return false;  // same origin — allow
+
+  res.statusCode = 403;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ error: 'cross-origin request rejected' }));
+  return true;
+}
+
 export default defineConfig({
   plugins: [
     {
@@ -23,12 +47,9 @@ export default defineConfig({
         //     -H 'Content-Type: application/json' \
         //     -d '{"script":"spawn(\"grunt\",5)"}'
         server.middlewares.use('/test-run', (req, res) => {
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          if (rejectCrossOrigin(req, res)) return;
           res.setHeader('Content-Type', 'application/json');
 
-          if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
           if (req.method !== 'POST') { res.statusCode = 405; res.end(JSON.stringify({ error: 'POST only' })); return; }
 
           let body = '';
@@ -50,7 +71,7 @@ export default defineConfig({
         // GET  /test-result → last battle result as JSON
         // POST /test-result ← browser pushes result after TEST.battle() completes
         server.middlewares.use('/test-result', (req, res) => {
-          res.setHeader('Access-Control-Allow-Origin', '*');
+          if (rejectCrossOrigin(req, res)) return;
           res.setHeader('Content-Type', 'application/json');
           if (req.method === 'GET') {
             res.end(JSON.stringify(lastResult ?? { error: 'no result yet — run TEST.battle() first' }));
@@ -77,7 +98,7 @@ export default defineConfig({
 
         // GET /test-history  — last 50 battle results as JSON array
         server.middlewares.use('/test-history', (req, res) => {
-          res.setHeader('Access-Control-Allow-Origin', '*');
+          if (rejectCrossOrigin(req, res)) return;
           res.setHeader('Content-Type', 'application/json');
           if (req.method === 'GET') { res.end(JSON.stringify(resultHistory)); return; }
           res.statusCode = 405; res.end();
@@ -87,7 +108,7 @@ export default defineConfig({
         // Useful to unstick a hung script (_scriptRunning stuck = true)
         // Usage:  curl -s -X POST http://localhost:5173/test-reload
         server.middlewares.use('/test-reload', (req, res) => {
-          res.setHeader('Access-Control-Allow-Origin', '*');
+          if (rejectCrossOrigin(req, res)) return;
           res.setHeader('Content-Type', 'application/json');
           if (req.method !== 'POST') { res.statusCode = 405; res.end(); return; }
           // Push a reload script to all SSE clients
@@ -100,10 +121,10 @@ export default defineConfig({
 
         // GET /test-events  — SSE stream the browser subscribes to
         server.middlewares.use('/test-events', (req, res) => {
+          if (rejectCrossOrigin(req, res)) return;
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
           res.setHeader('Connection', 'keep-alive');
-          res.setHeader('Access-Control-Allow-Origin', '*');
           if (res.flushHeaders) res.flushHeaders();
           clients.add(res);
           // Keep-alive ping every 20 s
