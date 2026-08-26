@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ─────────────────────────────────────────────
 //  CONFIG
@@ -21,13 +22,21 @@ const CFG = {
   // Wall:      sturdy blocker; cheap enough to spam key choke points
   STATS: {
     tower:     { range: 6.5, rate: 1.05, dmg: 3, pSpeed: 12, hp: 35, maxSlots: 8, unitCost: 1 },  // 3.15 DPS — bumped from 2.7 so single-target outpaces catapult on lone enemies
-    catapult:  { range: 8.5, rate: 0.4, dmg: 8, pSpeed: 6,  aoe: 2.2, hp: 35, maxSlots: 8, unitCost: 2 },  // 3.2 DPS + AoE — slight slow-down so it stays the crowd specialist, not strictly better than tower
-    archer:    { range: 8.0, rate: 1.9, dmg: 3, pSpeed: 18, hp: 22, maxSlots: 4, unitCost: 1 },  // rate 2.5→1.9: still strong burst but cost-efficiency closer to tower
-    swordsman: { range: 2.5, rate: 2.4, dmg: 2, hp: 26, maxSlots: 2, unitCost: 1 },              // rate 2.8→2.4 (was the cheapest DPS in the game by a mile)
+    catapult:  { range: 8.5, rate: 0.4, dmg: 8, pSpeed: 6,  aoe: 1.9, hp: 35, maxSlots: 8, unitCost: 2 },  // aoe 2.2→1.9: finished the 200g test on 89-97% castle HP from EVERY column tested, well clear of the next build. Trimmed the splash only — single-target DPS and the crowd-specialist identity are untouched.
+    archer:    { range: 8.0, rate: 1.9, dmg: 3, pSpeed: 18, hp: 30, maxSlots: 4, unitCost: 1 },  // hp 22→30: had the best DPS/slot in the game yet went 0-1-5 in the matchup matrix — it died before firing. Fixed the survivability, not the damage.
+    swordsman: { range: 2.5, rate: 2.4, dmg: 2, hp: 32, maxSlots: 2, unitCost: 1 },              // hp 26→32: cheapest DPS/gold but finished the 200g test on 7% castle HP; melee filler needs to survive contact to be worth a slot
     knight:    { range: 1.8, rate: 1.6, dmg: 5, hp: 65, maxSlots: 4, unitCost: 3 },
     spearman:  { range: 2.8, rate: 1.1, dmg: 5, hp: 32, maxSlots: 3, unitCost: 2 },              // dmg 4→5: gives spearman a real anti-tank niche between sword and knight
     wall:      { hp: 40, unitCost: 0 },                                 // was 35 — walls needed to be a bit sturdier
-    mage:      { range: 5.5, rate: 0.9, dmg: 3, pSpeed: 9,  hp: 25, maxSlots: 8, unitCost: 2 }, // dmg 2→3: slow + meaningful damage; cost dropped to 50 to match value
+    // The one unit that outright FAILED its 200g test (killed 5/12, leaked 7), and
+    // still lost 2 of 3 runs after a first +33% damage pass. It was paying twice —
+    // 50g AND 2 slots — for barely more DPS than a 36g/1-slot tower, on the shortest
+    // reach of any ranged unit. range 5.5→6.5 + dmg 3→4 + rate 0.9→1.05 (DPS 2.7→4.2)
+    // and hp 25→30 to match archer. unitCost 2→1 is the separate half of the fix: the
+    // slot cap is bypassed in test mode, so it never showed up in the 200g numbers,
+    // but in a real run MAX_DEFENDERS is the binding constraint and 2 slots priced a
+    // support caster out of every build.
+    mage:      { range: 6.5, rate: 1.05, dmg: 4, pSpeed: 9,  hp: 30, maxSlots: 8, unitCost: 1 },
     ballista:  { range: 10.0, rate: 0.3, dmg: 12, pSpeed: 22, hp: 30, maxSlots: 6, unitCost: 2 }, // long-range sniper; reduced dmg + pierce so it's strong, not god-tier
     spiketrap: { range: 0.75, rate: 2.0, dmg: 1, hp: 9999, unitCost: 1 },           // passive AoE; placed on path, no sell
   },
@@ -188,12 +197,12 @@ function resetGameField(opts = {}) {
   }
   orcs.length = 0;
 
-  // Remove all projectiles
+  // Remove all projectiles through the normal pool path so shared geometries stay reusable.
   for (const p of projectiles) {
-    scene.remove(p.mesh);
-    if (p.mesh?.geometry) p.mesh.geometry.dispose();
+    _releaseProjMesh(p.mesh, p.type);
   }
   projectiles.length = 0;
+  clearTrails();
 
   // Remove web zones (Group of meshes sharing one material)
   for (const w of webZones) {
@@ -259,6 +268,7 @@ function applyLayout(idx) {
   PATHS[0] = newA; PATHS[1] = newB; PATHS[2] = newC;
   PATH_SET = newSet;
   buildPathLanterns();
+  if (typeof rebuildGround === 'function') rebuildGround(); // paths changed → re-merge ground
 }
 
 // ─────────────────────────────────────────────
@@ -283,7 +293,11 @@ let castleGroup    = null; // reference to castle THREE.Group
 let totalStars      = 0;          // Feature 3: cumulative stars
 let waveStartHp     = 300;        // HP at start of wave (for no-damage star)
 let waveDefDeaths   = 0;          // non-wall defenders that died this wave
-let waveStartTime   = 0;          // Date.now() when wave started (for speed star)
+// Monotonic simulated-time clock in ms, accumulated in gameLoop from the SPEED-SCALED
+// dt. Never reset, so differences are always valid. All gameplay scoring reads this
+// rather than Date.now() so pausing and 2× speed can't distort stars or best-times.
+let _simClockMs     = 0;
+let waveStartTime   = 0;          // _simClockMs when the wave started (for the speed star)
 let hasteWaves      = 0;          // Feature 6: merchant haste
 let doubleBonusWave = false;       // Feature 6: merchant double bonus
 let streakCount     = 0;           // Feature 7: kill streak
@@ -320,8 +334,14 @@ const LEVELS = [
 const ENDLESS_LEVEL = { id: 'endless', name: 'Endless', biome: 5, layout: 4, startWave: 16, endWave: Infinity, startGold: 600, icon: '♾️' };
 // Each story level gets its own base theme so the soundtrack changes as you travel the realms.
 // (On Hard these are biased to darker cousins; intensity still escalates to dark/danger in fights.)
-//  1 Green Fields = whimsical · 2 Desert = exotic · 3 Icelands = adventurous · 4 Lava = aggressive · 5 Abyss = ominous
-const LEVEL_SONGS = { 1: 'wide', 2: 'bazaar', 3: 'switchback', 4: 'comb', 5: 'dark', endless: 'classic' };
+//  1 Green Fields = whimsical · 2 Desert = exotic · 3 Icelands = crystalline · 4 Lava = volcanic · 5 Abyss = vast/choral
+// Each level gets the track written for its biome. Level 5 used to sit on `dark`,
+// which is also the intensity-2 escalation cue — so the Abyss never changed sound
+// when the fight turned. It now has its own base track (`abyss`) to escalate from.
+const LEVEL_SONGS = { 1: 'wide', 2: 'bazaar', 3: 'frost', 4: 'ember', 5: 'abyss', endless: 'classic' };
+// Biome index → track, for map-editor and custom maps that have no level entry.
+// Order matches BIOMES: Meadow, Desert, Icelands, Lava, Mordor, Doom, Vibe.
+const BIOME_SONGS = ['wide', 'bazaar', 'frost', 'ember', 'abyss', 'doom', 'vibe'];
 const LEVEL_MAX_STARS = 3;
 let currentLevel    = null;       // LEVELS entry while playing a level; null in menu; ENDLESS_LEVEL in endless
 let levelStarsEarned = 0;         // stars accumulated across the current level's waves (0-9)
@@ -357,15 +377,32 @@ function loadSave(key, defaults = null) {
     return defaults;
   }
   if (!raw) return defaults;
-  let data;
-  try { data = JSON.parse(raw); } catch (err) {
+  let stored;
+  try { stored = JSON.parse(raw); } catch (err) {
     console.warn(`loadSave(${key}): corrupted JSON, using defaults`, err);
     return defaults;
   }
-  if (data == null) return defaults;
+  if (stored == null) return defaults;
+
+  // Unwrap the storage shape into (data, version). Arrays can't carry a
+  // schemaVersion inline — JSON.stringify drops non-index properties — so
+  // saveSave() wraps them in an envelope. Three cases:
+  //   { __arrayEnvelope: true, schemaVersion, items } → versioned array save
+  //   [ ... ]                                        → array written before the
+  //                                                    envelope existed, i.e. v1
+  //   { schemaVersion, ... }                         → ordinary object save
+  // Migrations always see the unwrapped value (the bare array / the object).
+  let data, version;
+  if (stored && stored.__arrayEnvelope === true && Array.isArray(stored.items)) {
+    data = stored.items;
+    version = stored.schemaVersion || 1;
+  } else {
+    data = stored;
+    version = (!Array.isArray(stored) && typeof stored === 'object' && stored.schemaVersion) || 1;
+  }
+
   // Run migrations if the save is older than current version
   const target = CURRENT_SAVE_VERSIONS[key] ?? 1;
-  let version = (typeof data === 'object' && data.schemaVersion) || 1;
   const migrations = SAVE_MIGRATIONS[key] || {};
   while (version < target && migrations[version]) {
     try {
@@ -381,11 +418,19 @@ function loadSave(key, defaults = null) {
 
 function saveSave(key, data) {
   if (data == null) return;
-  // Stamp the current schema version so future migrations know the source shape
-  if (typeof data === 'object' && !Array.isArray(data)) {
-    data.schemaVersion = CURRENT_SAVE_VERSIONS[key] ?? 1;
+  // Stamp the current schema version so future migrations know the source shape.
+  const version = CURRENT_SAVE_VERSIONS[key] ?? 1;
+  let payload = data;
+  if (Array.isArray(data)) {
+    // An array can't hold the stamp itself (JSON.stringify ignores non-index
+    // properties), which used to leave td_saved_maps / td_studio_objects
+    // permanently unversioned — the first migration added for either key would
+    // then re-run on already-migrated data on every single load. Wrap instead.
+    payload = { __arrayEnvelope: true, schemaVersion: version, items: data };
+  } else if (typeof data === 'object') {
+    data.schemaVersion = version;
   }
-  try { localStorage.setItem(key, JSON.stringify(data)); } catch (err) {
+  try { localStorage.setItem(key, JSON.stringify(payload)); } catch (err) {
     console.warn(`saveSave(${key}): localStorage write failed`, err);
   }
 }
@@ -400,15 +445,28 @@ const DIFFICULTY_PRESETS = {
   hard:   { hp: 1.25, speed: 1.10, rewardMult: 1.25, label: 'Hard',   icon: '🔥' },
 };
 let currentDifficulty = 'normal'; // key into DIFFICULTY_PRESETS
+// td_difficulty is registered in CURRENT_SAVE_VERSIONS but used to read and write
+// raw, so it sat outside the migration system entirely. It's stored as an object
+// now ({difficulty}) because a bare string can't carry a schemaVersion.
 function loadDifficulty() {
+  let v = null;
+  // Pre-versioning format: the bare, UNQUOTED preset name. Check it first so an
+  // existing player keeps their choice — and so loadSave doesn't log a parse
+  // warning for a value that was never valid JSON. A versioned save is an object,
+  // whose serialization can't collide with a preset key, so there's no ambiguity.
   try {
-    const v = localStorage.getItem('td_difficulty');
-    if (v && DIFFICULTY_PRESETS[v]) currentDifficulty = v;
+    const raw = localStorage.getItem('td_difficulty');
+    if (raw && DIFFICULTY_PRESETS[raw]) v = raw;
   } catch {}
+  if (!v) {
+    const saved = loadSave('td_difficulty', null);
+    if (saved && typeof saved === 'object') v = saved.difficulty;
+  }
+  if (v && DIFFICULTY_PRESETS[v]) currentDifficulty = v;
   applyDifficulty();
 }
 function saveDifficulty() {
-  try { localStorage.setItem('td_difficulty', currentDifficulty); } catch {}
+  saveSave('td_difficulty', { difficulty: currentDifficulty });
 }
 function applyDifficulty() {
   const p = DIFFICULTY_PRESETS[currentDifficulty];
@@ -442,8 +500,15 @@ function maybeUpdateEndlessBest() {
 }
 
 // ── Level run timer (for "best clear time" per story level) ──────────────────
-let _levelRunStartMs = 0;          // ms timestamp when a level started
-function _levelElapsedMs() { return _levelRunStartMs ? (Date.now() - _levelRunStartMs) : 0; }
+let _levelRunStartMs = 0;          // _simClockMs when the level started
+// Separate active flag rather than testing _levelRunStartMs for truthiness: it now
+// holds a simulated-time value, and 0 is a perfectly legitimate start stamp (first
+// level of a fresh page load), which would have made the timer read 0 forever.
+let _levelRunActive  = false;
+// Difficulty the current level run STARTED on. Best times are filed under this, not
+// the live setting, which the ESC menu can change mid-run.
+let _levelRunDifficulty = null;
+function _levelElapsedMs() { return _levelRunActive ? (_simClockMs - _levelRunStartMs) : 0; }
 function _formatTimeMs(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(s / 60);
@@ -575,7 +640,11 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.BasicShadowMap;  // hard pixel-perfect block shadows
-renderer.toneMapping = THREE.NoToneMapping;       // pure colours, no filmic grading
+// ACES filmic tone mapping — richer mid-tones and smooth emissive roll-off (crystals,
+// lava, magic stop clipping to flat white). Exposure raised to compensate for ACES's
+// darker base response so the voxel palette keeps its punch.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.25;
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 280);
 camera.position.set(32, 38, 68);
@@ -689,6 +758,10 @@ function pxMat(baseHex, opts = {}, extra = {}) {
 const M = {
   grassA:       new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.94, metalness: 0.0 }),
   pathMat:      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x223311, emissiveIntensity: 0.10, roughness: 0.95 }),
+  // Kerb stones edging the road. Tinted per-biome alongside pathMat, but kept a
+  // shade darker so the shoulder reads as a distinct lip rather than more road.
+  kerbMat:      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, metalness: 0.0 }),
+  lanternGlass: new THREE.MeshStandardMaterial({ color: 0xffee88, emissive: 0xffaa22, emissiveIntensity: 1.6, transparent: true, opacity: 0.55, depthWrite: false }),
   castleStone:  new THREE.MeshStandardMaterial({ color: 0x5a6878 }),
   castleLight:  new THREE.MeshStandardMaterial({ color: 0x6e8090 }),
   castleDark:   new THREE.MeshStandardMaterial({ color: 0x2a3848 }),
@@ -736,8 +809,6 @@ const M = {
   // Enemy Archer
   eArcherBody:  pxMat('#221808', { stripes: true }), // dark warm brown
   eArcherHood:  pxMat('#141028'),                    // deep indigo-black hood
-  oArchSkin:    pxMat('#485228'),                    // military olive, distinct from grunt teal
-  oArchLeather: pxMat('#2a1a08'),
   // Defender extras
   swShield:     new THREE.MeshStandardMaterial({ color: 0x1a3060, metalness: 0.35, roughness: 0.55 }),
   swVisor:      new THREE.MeshStandardMaterial({ color: 0x080c18 }),
@@ -747,13 +818,32 @@ const M = {
   // against the enemy's matte blood-red bodies, so it never blurs the faction line.
   swGold:       new THREE.MeshStandardMaterial({ color: 0xe0a82a, metalness: 0.7, roughness: 0.32, emissive: 0x3a2400, emissiveIntensity: 0.22 }),
   spCape:       new THREE.MeshStandardMaterial({ color: 0x1a2e72 }),  // deep royal-blue cape (was crimson — now matches the Azure Order)
+  // Spearman helmet plume. It was spCape — a DARK blue marker sitting on a blue
+  // body, so the one silhouette feature that could tell a spearman apart at play
+  // distance was invisible. Bright cyan keeps it cool-faction while making the
+  // marker actually do its job. Knight keeps gold, so the two never collide.
+  spPlume:      new THREE.MeshStandardMaterial({ color: 0x46d8f0, emissive: 0x1a6a80, emissiveIntensity: 0.35 }),
+  // Swordsman crest. The three head-marker colours are deliberately exclusive so
+  // no two roles can be confused from above: knight = gold, spearman = cyan,
+  // swordsman = pale steel. Pale reads against its bright royal-blue tunic.
+  swCrest:      new THREE.MeshStandardMaterial({ color: 0xd8e2ee, roughness: 0.5, metalness: 0.25 }),
   spHelmet:     new THREE.MeshStandardMaterial({ color: 0x62748c, metalness: 0.55, roughness: 0.45 }),  // steel blue-grey (was bronze)
-  arcHood:      new THREE.MeshStandardMaterial({ color: 0x0e2c3c }),  // dark blue-teal hood (shifted off green)
+  // Was 0x0e2c3c — so dark it read as a black blob from the play camera, which is
+  // the worst case for the one unit whose hood IS its silhouette from above.
+  arcHood:      new THREE.MeshStandardMaterial({ color: 0x1d5f79 }),  // blue-teal hood, lifted for readability
   arcBelt:      new THREE.MeshStandardMaterial({ color: 0x3a2010 }),
   mageBeard:    new THREE.MeshStandardMaterial({ color: 0xe8e0d0 }),  // ivory wizard beard
-  swTunic:      pxMat('#1e3a7a'),                                     // royal blue swordsman tunic
-  spTunic:      pxMat('#2a4060'),                                     // slate blue spearman cloth
-  arcTeal:      pxMat('#296a86'),                                    // blue-teal archer (shifted off green into the cool faction)
+  // ── Role-readability ladder ──────────────────────────────────────────────
+  // The Azure & Gold faction look below is deliberate and stays. The problem it
+  // created is that EVERY player unit landed in the same dark blue band
+  // (#1e3a7a / #2a4060 / #296a86 / #1a4a8a), and at the real play camera a unit is
+  // only ~12px tall — so swordsman, spearman, archer and mage read as one blue
+  // smudge. These spread the roles across distinct LIGHTNESS and hue-within-cool
+  // so they separate at a glance, while every one stays unmistakably in-faction
+  // (cool blues + gold trim) against the enemy's warm reds and greens.
+  swTunic:      pxMat('#2a56b4'),                                     // swordsman — bright royal blue (the baseline unit, should read clearly)
+  spTunic:      pxMat('#4a6a94'),                                     // spearman  — light steel-blue, separates from the swordsman
+  arcTeal:      pxMat('#1f93ad'),                                    // archer    — bright teal, pushed cooler/greener than the rest
   towerRoof:    new THREE.MeshStandardMaterial({ color: 0x12122a }),
   // Projectiles
   bolt:         new THREE.MeshStandardMaterial({ color: 0x00d4ff, emissive: 0x00d4ff, emissiveIntensity: 1.5 }),
@@ -762,8 +852,11 @@ const M = {
   rockMat:      new THREE.MeshStandardMaterial({ color: 0x888898 }),
   enemyRock:    new THREE.MeshStandardMaterial({ color: 0x7a6a58 }),
   // Mage defender
-  magePurple:   pxMat('#1a4a8a'),
-  mageRobe:     pxMat('#0d2a6a', { stripes: true }),
+  // Mage is pushed violet — the only role allowed off pure blue, so the caster is
+  // instantly distinguishable from the three melee/ranged blues. Still cool-side,
+  // so it reads as the same army rather than a third faction.
+  magePurple:   pxMat('#4b3aa8'),
+  mageRobe:     pxMat('#2e1f7a', { stripes: true }),
   mageOrb:      new THREE.MeshStandardMaterial({ color: 0x55aaff, emissive: 0x2266ff, emissiveIntensity: 2.0 }),
   mageEye:      new THREE.MeshStandardMaterial({ color: 0x00ccff, emissive: 0x0088ff, emissiveIntensity: 2.5 }),
   mageStaff:    new THREE.MeshStandardMaterial({ color: 0x3a2510 }),
@@ -1608,11 +1701,101 @@ function buildGrid() {
       const m = new THREE.Mesh(GEO.tile, mat);
       m.position.set(c, -0.15, r);
       m.receiveShadow = true;
+      // Perf: the 72×54 = 3888 individual tile meshes were ~85% of all draw calls (→ low FPS,
+      // "teleporting" units). Each tile mesh is now the invisible DATA model (kept so every
+      // existing material-swap / pond / map-editor path still works untouched); actual ground
+      // rendering is done by a handful of merged meshes (see rebuildGround), rebuilt only when
+      // tiles change — never per frame. Hover raycasting uses the ground plane instead.
+      m.visible = false;
       m.userData = { col: c, row: r, isTile: true };
       scene.add(m);
       grid[`${c},${r}`] = { type, mesh: m };
     }
   }
+  rebuildGround();
+}
+
+// Merge every tile mesh into one static mesh per material — collapses ~3900 per-tile
+// draw calls into ~3-5. Reads the CURRENT material + position of each (invisible) tile
+// mesh, so it faithfully mirrors path/grass/castle/water/editor state. Biome recolors act
+// on the shared material objects in place, so a biome color change needs no rebuild; only
+// STRUCTURAL tile changes (layout paths, ponds, scenery, editor paint) call this.
+let _groundMeshes = [];
+function rebuildGround() {
+  for (const gm of _groundMeshes) { scene.remove(gm); if (gm.geometry) gm.geometry.dispose(); }
+  _groundMeshes.length = 0;
+  const byMat = new Map();
+  for (const key in grid) {
+    const tm = grid[key].mesh;
+    if (!tm) continue;
+    const g = GEO.tile.clone();
+    g.translate(tm.position.x, tm.position.y, tm.position.z);
+    let arr = byMat.get(tm.material);
+    if (!arr) { arr = []; byMat.set(tm.material, arr); }
+    arr.push(g);
+  }
+  for (const [mat, geos] of byMat) {
+    const merged = mergeGeometries(geos, false);
+    for (const g of geos) g.dispose();
+    if (!merged) continue;
+    const gm = new THREE.Mesh(merged, mat);
+    gm.receiveShadow = true;
+    gm.userData.isGroundMerge = true;
+    scene.add(gm);
+    _groundMeshes.push(gm);
+  }
+  rebuildRoadKerbs();
+}
+
+// ── Road kerbing ─────────────────────────────────────────────────────────────
+// The road had a good cobble texture but no 3D structure, so it read as paint on
+// the grass rather than something built. This lays a raised kerb stone along every
+// edge where a path tile meets a non-path tile, which is what gives a road a
+// defined shoulder.
+//
+// The stones sit just INSIDE the path tile (0.44 from centre, 0.10 wide) rather
+// than straddling the boundary — a kerb spilling onto the grass would clip walls
+// and towers placed on the adjacent buildable tile.
+//
+// One InstancedMesh for the whole map: a typical layout has a few hundred edges,
+// which as separate meshes would undo the merge that got ground rendering down to
+// a handful of draw calls in the first place.
+let _kerbMesh = null;
+function rebuildRoadKerbs() {
+  if (_kerbMesh) {
+    scene.remove(_kerbMesh);
+    _kerbMesh.geometry.dispose();
+    _kerbMesh.dispose?.();
+    _kerbMesh = null;
+  }
+  const IN = 0.44, W = 0.10, H = 0.11;
+  const edges = [];
+  for (const key in grid) {
+    if (grid[key].type !== 'path') continue;
+    const [c, r] = key.split(',').map(Number);
+    // A kerb goes on each side that ISN'T also road. Interior road-to-road joins
+    // stay open, so the stones trace the outline of the route instead of tiling
+    // a box around every single square.
+    const sides = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    for (const [dc, dr] of sides) {
+      const n = grid[`${c + dc},${r + dr}`];
+      if (n && (n.type === 'path' || n.type === 'castle')) continue;
+      edges.push([c + dc * IN, r + dr * IN, dc !== 0]);
+    }
+  }
+  if (!edges.length) return;
+
+  _kerbMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M.kerbMat, edges.length);
+  _kerbMesh.castShadow = _kerbMesh.receiveShadow = true;
+  const mtx = new THREE.Matrix4();
+  edges.forEach(([x, z, vertical], i) => {
+    // Vertical edges run along Z, horizontal ones along X.
+    mtx.makeScale(vertical ? W : 1.0, H, vertical ? 1.0 : W);
+    mtx.setPosition(x, -0.15 + H * 0.5, z);
+    _kerbMesh.setMatrixAt(i, mtx);
+  });
+  _kerbMesh.instanceMatrix.needsUpdate = true;
+  scene.add(_kerbMesh);
 }
 
 // ─────────────────────────────────────────────
@@ -1802,23 +1985,72 @@ function buildMushroom(x, z, scale = 1.0) {
   return g;
 }
 
-function buildHill(c, r, h) {
-  // Central cap
-  const cap = mesh(box(1.08, h + 0.3, 1.08), M.hillGrass);
-  cap.position.set(c, (h + 0.3) * 0.5 - 0.15, r);
-  scene.add(cap);
-  hillMeshes.push(cap);
-  // Sloped neighbors
-  [[c-1,r],[c+1,r],[c,r-1],[c,r+1]].forEach(([nc, nr]) => {
-    const cell = grid[`${nc},${nr}`];
-    if (cell && cell.type === 'grass') {
-      const sh = h * 0.45 + 0.15;
-      const slope = mesh(box(1.0, sh, 1.0), M.hillDark);
-      slope.position.set(nc, sh * 0.5 - 0.15, nr);
-      scene.add(slope);
-      hillMeshes.push(slope);
+// ── Terraced Minecraft-style hill ────────────────────────────────────────────
+// Was a single tall block with four shorter ones around it — a plus-shaped mound
+// with exactly two elevations. This builds a proper landform instead: a radial
+// height field QUANTISED to whole block steps, so the silhouette steps down in
+// cubes the way Minecraft terrain does rather than sloping smoothly. Each column
+// is grass-capped over a dirt body, which is what actually reads as "Minecraft".
+//
+// Every column is an instance of a shared unit cube, so the whole hill costs two
+// draw calls (bodies + caps) no matter how many columns it has — a 20-column hill
+// is cheaper to render than the 5 separate meshes this replaces.
+const HILL_STEP = 0.42;          // one "block" of elevation
+const HILL_CAP  = 0.22;          // thickness of the grass layer on top
+function buildHill(c, r, h, rng = Math.random, keepOut = null) {
+  const R    = h > 0.72 ? 5 : 4;                          // taller peaks spread wider
+  // 4–9 blocks of relief (~1.7–3.8 units, i.e. up to ~4 tile-widths tall).
+  const peak = 3 + Math.round(h * 6);
+
+  // Collect column heights first — we need the count before allocating instances.
+  const cols = [];
+  for (let dc = -R; dc <= R; dc++) {
+    for (let dr = -R; dr <= R; dr++) {
+      const cc = c + dc, rr = r + dr;
+      const cell = grid[`${cc},${rr}`];
+      // Only ever raise plain grass. Guarantees a hill can never bury a path
+      // tile, a tree, or the castle even when its radius overlaps one.
+      if (!cell || cell.type !== 'grass') continue;
+      // ...and never inside the build band beside a path, where a raised tile
+      // would swallow whatever the player (or the test harness) puts on it.
+      if (keepOut && keepOut.has(`${cc},${rr}`)) continue;
+      const dist = Math.hypot(dc, dr);
+      if (dist > R + 0.4) continue;
+      const t = Math.max(0, 1 - dist / (R + 0.4));
+      const dome = t * t * (3 - 2 * t);                   // smoothstep falloff
+      // Jitter breaks the perfect circle so hills read as natural landforms.
+      const blocks = Math.round(peak * dome + (rng() - 0.5) * 0.9);
+      if (blocks >= 1) cols.push([cc, rr, blocks]);
     }
+  }
+  if (!cols.length) return cols;
+
+  // Fresh geometry per InstancedMesh: the Clear-All path disposes each entry in
+  // hillMeshes, so sharing one cube across hills would dispose it out from under
+  // every other hill on the map.
+  const bodies = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M.hillDark,  cols.length);
+  const caps   = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), M.hillGrass, cols.length);
+  bodies.castShadow = bodies.receiveShadow = true;
+  caps.castShadow   = caps.receiveShadow   = true;
+
+  const mtx = new THREE.Matrix4();
+  cols.forEach(([cc, rr, blocks], i) => {
+    const top    = blocks * HILL_STEP;                    // top surface above ground
+    const bodyH  = Math.max(0.02, top - HILL_CAP + 0.15); // ground sits at y = -0.15
+    mtx.makeScale(1.0, bodyH, 1.0);
+    mtx.setPosition(cc, -0.15 + bodyH * 0.5, rr);
+    bodies.setMatrixAt(i, mtx);
+    // Cap slightly oversized so it reads as a distinct grass layer, not a seam.
+    mtx.makeScale(1.02, HILL_CAP, 1.02);
+    mtx.setPosition(cc, top - HILL_CAP * 0.5, rr);
+    caps.setMatrixAt(i, mtx);
   });
+  bodies.instanceMatrix.needsUpdate = true;
+  caps.instanceMatrix.needsUpdate   = true;
+
+  scene.add(bodies); scene.add(caps);
+  hillMeshes.push(bodies, caps);
+  return cols;      // caller reserves these tiles so nothing gets placed floating on raised ground
 }
 
 function buildRock(x, z, scale, rng) {
@@ -1903,6 +2135,33 @@ function buildScenery() {
     for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) blocked.add(`${c+dc},${r+dr}`);
   });
 
+  // Hills are BACKGROUND scenery: they frame the map from the outer border, the
+  // same band the horizon trees occupy, and never intrude on the playfield.
+  //
+  // This is the real fix for hills swallowing units. Nothing is drawn with
+  // terrain-height awareness — every unit sits at y=0 — so any raised tile inside
+  // the play area will bury whatever gets placed on it. Rather than patch that
+  // per-case, keep raised ground out of the play area entirely.
+  //
+  // hillKeepOut is everything a hill may NOT raise: the band around every path,
+  // plus the whole map interior. buildHill already consults it per column, so a
+  // big hill can't reach inward past the border even when its centre is legal.
+  const HILL_PATH_CLEARANCE = 3;   // margin around roads, for where paths near the rim
+  const HILL_BORDER_BAND    = 8;   // how deep from the map edge hills may sit
+  const hillKeepOut = new Set();
+  allPathKeys.forEach(key => {
+    const [c, r] = key.split(',').map(Number);
+    for (let dc = -HILL_PATH_CLEARANCE; dc <= HILL_PATH_CLEARANCE; dc++)
+      for (let dr = -HILL_PATH_CLEARANCE; dr <= HILL_PATH_CLEARANCE; dr++)
+        hillKeepOut.add(`${c + dc},${r + dr}`);
+  });
+  for (let c = 0; c < CFG.GRID_W; c++) {
+    for (let r = 0; r < CFG.GRID_H; r++) {
+      const edgeDist = Math.min(c, r, CFG.GRID_W - 1 - c, CFG.GRID_H - 1 - r);
+      if (edgeDist > HILL_BORDER_BAND) hillKeepOut.add(`${c},${r}`);
+    }
+  }
+
   let seed = 31337;
   const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967295; };
 
@@ -1934,6 +2193,30 @@ function buildScenery() {
     const _tc = grid[`${c},${r}`]; if (_tc && _tc.type === 'grass') _tc.type = 'scenery';
     markUsed(c, r, pad);
     return true;
+  }
+
+  // ── 0. HILLS — terrain first, before anything is placed on the ground ──
+  // These used to run 5th, after villages/groves/border/interior trees had all
+  // marked their tiles used. Needing a clear 5×5 by then was essentially
+  // impossible: instrumenting it showed 56 candidate sites, 56 blocked, ZERO
+  // hills built — the map has been flat this whole time. Terrain has to be laid
+  // before the things that sit on it, so it now runs first and gets open ground.
+  //
+  // Each hill reserves the tiles it actually raised, so later passes never drop a
+  // tree or a cottage onto a raised column (they'd sit at y=0 and sink into it).
+  // Spacing tracks the hill radius — at a tighter step every hill lands inside its
+  // neighbour's reserved footprint, so they'd merge into one shapeless mass.
+  for (let c = 2; c < CFG.GRID_W - 2; c += 4) {
+    for (let r = 2; r < CFG.GRID_H - 2; r += 4) {
+      // Border ring only. An interior centre would have every one of its columns
+      // rejected by hillKeepOut anyway — skipping here just avoids the dead work.
+      const edgeDist = Math.min(c, r, CFG.GRID_W - 1 - c, CFG.GRID_H - 1 - r);
+      if (edgeDist > HILL_BORDER_BAND) continue;
+      if (rng() > 0.75) continue;
+      if (!canPlace(c, r, 1)) continue;
+      const raised = buildHill(c, r, 0.30 + rng() * 0.70, rng, hillKeepOut);
+      for (const [cc, rr] of raised) markUsed(cc, rr, 0);
+    }
   }
 
   // ── 1. VILLAGE CENTERS — 2-4 per map, realistic layout ──
@@ -2052,15 +2335,6 @@ function buildScenery() {
     }
   }
 
-  // ── 5. HILLS — raised bumps in grass strips between roads
-  for (let c = 2; c < CFG.GRID_W - 2; c += 2) {
-    for (let r = 2; r < CFG.GRID_H - 2; r += 2) {
-      if (rng() > 0.22) continue;
-      if (!canPlace(c, r, 2)) continue;
-      buildHill(c, r, 0.30 + rng() * 0.70);
-      markUsed(c, r, 2);
-    }
-  }
 
   // ── 6. ROCKS — scattered boulders and clusters across the landscape
   for (let c = 2; c < CFG.GRID_W - 2; c += 2) {
@@ -2118,6 +2392,7 @@ function buildScenery() {
       }
     }
   }
+  if (typeof rebuildGround === 'function') rebuildGround(); // ponds changed tiles -> re-merge ground
 }
 
 // ─────────────────────────────────────────────
@@ -2151,6 +2426,103 @@ function buildSky() {
 }
 
 // ─────────────────────────────────────────────
+//  VOXEL CLOUDS — blocky white clouds drifting over the field, casting hard
+//  moving shadows (Minecraft-style). Driven by real time so they keep drifting
+//  on menus and while paused — the world always feels alive.
+// ─────────────────────────────────────────────
+const _clouds = [];
+function buildClouds() {
+  const cloudMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 1.0, flatShading: true,
+    transparent: true, opacity: 0.94,
+  });
+  for (let i = 0; i < 7; i++) {
+    const g = new THREE.Group();
+    const blocks = 3 + Math.floor(Math.random() * 3);
+    let bx = 0;
+    for (let b = 0; b < blocks; b++) {
+      const w = 2.4 + Math.random() * 2.8;
+      const h = 0.7 + Math.random() * 0.5;
+      const d = 1.8 + Math.random() * 2.2;
+      const m = new THREE.Mesh(box(w, h, d), cloudMat);
+      m.position.set(bx, (Math.random() - 0.5) * 0.36, (Math.random() - 0.5) * 1.6);
+      m.castShadow = true;          // hard blocky shadow sweeping the ground
+      m.receiveShadow = false;
+      g.add(m);
+      bx += w * 0.55;
+    }
+    g.position.set(Math.random() * 130 - 26, 13.5 + Math.random() * 5, Math.random() * 62 - 4);
+    g.userData.speed = 0.35 + Math.random() * 0.45;
+    scene.add(g);
+    _clouds.push(g);
+  }
+}
+function updateClouds(rdt) {
+  for (const c of _clouds) {
+    c.position.x += c.userData.speed * rdt;
+    if (c.position.x > 104) c.position.x = -30;   // wrap around the map
+  }
+}
+
+// ─────────────────────────────────────────────
+//  BIOME ATMOSPHERE — a single Points cloud of slow-drifting motes whose color
+//  and motion match the realm: meadow pollen, desert dust, falling snow, rising
+//  embers, drifting ash, void motes, neon sparkles.
+// ─────────────────────────────────────────────
+const _AIR_COUNT = 160;
+const _AIR_BIOME = [
+  { color: 0xf0ffb0, op: 0.45, size: 0.13, vx: 0.25, vy:  0.18, sway: 0.6 }, // Meadow — pollen
+  { color: 0xeed9a0, op: 0.38, size: 0.13, vx: 1.10, vy:  0.05, sway: 0.4 }, // Desert — wind-blown dust
+  { color: 0xffffff, op: 0.60, size: 0.15, vx: 0.25, vy: -0.85, sway: 0.7 }, // Icelands — falling snow
+  { color: 0xffa843, op: 0.55, size: 0.14, vx: 0.15, vy:  0.65, sway: 0.5 }, // Lava — rising embers
+  { color: 0x998d88, op: 0.40, size: 0.14, vx: 0.30, vy: -0.30, sway: 0.4 }, // Mordor — drifting ash
+  { color: 0xc77dff, op: 0.50, size: 0.14, vx: 0.20, vy:  0.30, sway: 0.8 }, // Doom — void motes
+  { color: 0x7df9ff, op: 0.55, size: 0.14, vx: 0.40, vy:  0.25, sway: 1.0 }, // Vibe — neon sparkles
+];
+let _airPoints = null, _airBase = null, _airPhase = null, _airSpd = null, _airMode = _AIR_BIOME[0];
+function buildAtmosphere() {
+  _airBase  = new Float32Array(_AIR_COUNT * 3);
+  _airPhase = new Float32Array(_AIR_COUNT);
+  _airSpd   = new Float32Array(_AIR_COUNT);
+  for (let i = 0; i < _AIR_COUNT; i++) {
+    _airBase[i * 3]     = Math.random() * 82 - 5;
+    _airBase[i * 3 + 1] = 0.4 + Math.random() * 7.6;
+    _airBase[i * 3 + 2] = Math.random() * 64 - 5;
+    _airPhase[i] = Math.random() * Math.PI * 2;
+    _airSpd[i]   = 0.6 + Math.random() * 0.8;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_AIR_COUNT * 3), 3));
+  const mat = new THREE.PointsMaterial({
+    color: _airMode.color, size: _airMode.size, sizeAttenuation: true,
+    transparent: true, opacity: _airMode.op, depthWrite: false,
+  });
+  _airPoints = new THREE.Points(geo, mat);
+  _airPoints.frustumCulled = false;   // points wrap across the whole map — always visible
+  scene.add(_airPoints);
+}
+function _applyAtmosphereBiome(idx) {
+  if (!_airPoints) return;
+  _airMode = _AIR_BIOME[idx % _AIR_BIOME.length] || _AIR_BIOME[0];
+  _airPoints.material.color.setHex(_airMode.color);
+  _airPoints.material.opacity = _airMode.op;
+  _airPoints.material.size = _airMode.size;
+}
+const _airWrap = (v, min, max) => { const r = max - min; return ((v - min) % r + r) % r + min; };
+function updateAtmosphere(t) {
+  if (!_airPoints) return;
+  const arr = _airPoints.geometry.attributes.position.array;
+  const m = _airMode;
+  for (let i = 0; i < _AIR_COUNT; i++) {
+    const s = _airSpd[i], ph = _airPhase[i];
+    arr[i * 3]     = _airWrap(_airBase[i * 3]     + m.vx * t * s + Math.sin(t * 0.5 + ph) * m.sway, -5, 77);
+    arr[i * 3 + 1] = _airWrap(_airBase[i * 3 + 1] + m.vy * t * s,                                    0.3, 8.4);
+    arr[i * 3 + 2] = _airWrap(_airBase[i * 3 + 2] + Math.sin(t * 0.3 + ph) * m.sway * 0.7,          -5, 59);
+  }
+  _airPoints.geometry.attributes.position.needsUpdate = true;
+}
+
+// ─────────────────────────────────────────────
 //  PATH LANTERNS
 // ─────────────────────────────────────────────
 function makeLanternMesh() {
@@ -2173,8 +2545,10 @@ function makeLanternMesh() {
   [[ 0.08, 0.08],[ 0.08,-0.08],[-0.08, 0.08],[-0.08,-0.08]].forEach(([cx,cz]) => {
     const bar = mesh(box(0.025, 0.28, 0.025), M.lanternPost); bar.position.set(cx, 0.82, 0.35 + cz); g.add(bar);
   });
-  // 4 glass pane sides (translucent glow colour)
-  const gpMat = new THREE.MeshStandardMaterial({ color: 0xffee88, emissive: 0xffaa22, emissiveIntensity: 1.6, transparent: true, opacity: 0.55, depthWrite: false });
+  // 4 glass pane sides (translucent glow colour). Shared across every lantern —
+  // this used to allocate a fresh material per lamp, so a layout rebuild churned
+  // one throwaway material for each of them.
+  const gpMat = M.lanternGlass;
   [[0, 0.08],[0,-0.08],[0.08,0],[-0.08,0]].forEach(([gx,gz]) => {
     const gp = new THREE.Mesh(box(gz !== 0 ? 0.16 : 0.01, 0.22, gx !== 0 ? 0.16 : 0.01), gpMat);
     gp.position.set(gx, 0.82, 0.35 + gz); gp.castShadow = false; g.add(gp);
@@ -2227,6 +2601,10 @@ function buildPathLanterns() {
       // Point light inside lantern cage
       const ptLight = new THREE.PointLight(0xffaa22, 1.1, 6.0);
       ptLight.position.set(0, 0.88, 0.38);
+      // Fixed per-lamp phase so this lantern's flame drifts out of step with its
+      // neighbours. Derived from position rather than Math.random() so a layout
+      // rebuild reproduces the same lighting instead of reshuffling it.
+      ptLight.userData.flickerPhase = ((c * 12.9898 + r * 78.233) % Math.PI) * 2;
       lamp.add(ptLight);
       lanternLights.push(ptLight);
       lanternGroup.add(lamp);
@@ -2864,6 +3242,7 @@ function applyBiome(idx) {
   torchL.color.setHex(b.torch); torchR.color.setHex(b.torch);
   for (const l of lanternLights) l.color.setHex(b.torch);
   M.voidPlane.color.setHex(b.hill[0]);
+  _applyAtmosphereBiome(i);   // air motes recolor to match the realm (pollen/snow/embers/…)
 
   if (M.grassA.map) M.grassA.map.dispose();
   M.grassA.map = makeGroundTex(b.name);
@@ -2891,6 +3270,10 @@ function applyBiome(idx) {
   M.waterSurf.color.setHex(b.water.surf[0]);       M.waterSurf.opacity = b.water.surf[1];
 
   M.pathMat.color.setHex(b.pathTint);
+  // Kerbs follow the road's biome tint, darkened so the shoulder stays readable
+  // against the road surface in every biome rather than blending into it.
+  M.kerbMat.color.setHex(b.pathTint);
+  M.kerbMat.color.multiplyScalar(0.72);
 
   // Crystal stays blue always — only bolt tints with biome
   M.bolt.color.setHex(b.crystal);    M.bolt.emissive.setHex(b.crystal);
@@ -2955,6 +3338,12 @@ function buildCastle() {
       g.add(bar);
     }
   });
+  // Portcullis winch housings — chain boxes atop the gate wall over each opening
+  [25, 27, 29].forEach(cz => {
+    const housing = mesh(box(0.55, 0.30, 0.72), M.catWood); housing.position.set(66, 3.62, cz); g.add(housing);
+    const axle = mesh(box(0.10, 0.10, 0.88), M.catMetal); axle.position.set(66, 3.80, cz); g.add(axle);
+    const crank = mesh(box(0.06, 0.22, 0.06), M.catMetal); crank.position.set(66, 3.80, cz + 0.50); g.add(crank);
+  });
 
   // Flanking gate towers (col 66) — banding, corner pillars, arrow slits
   [[66,23],[66,31]].forEach(([cx,cz]) => {
@@ -3003,6 +3392,13 @@ function buildCastle() {
         const sh = mesh(isX ? box(0.08,0.09,0.30) : box(0.30,0.09,0.08), M.castleDark); sh.position.set(cx+ox, sy+0.10, cz+oz); g.add(sh);
       });
     });
+  });
+
+  // Corner-tower lookout windows — warm interior glow on the outward faces
+  [[66,4.9,23,-1],[66,4.9,31,-1],[71,4.4,23,1],[71,4.4,31,1]].forEach(([cx,wy,cz,dir]) => {
+    const frame = mesh(box(0.10, 0.56, 0.42), M.castleDark); frame.position.set(cx + dir*0.66, wy, cz); g.add(frame);
+    const glow  = mesh(box(0.08, 0.42, 0.30), M.townWin);   glow.position.set(cx + dir*0.68, wy, cz); g.add(glow);
+    const sill  = mesh(box(0.14, 0.08, 0.50), M.castleLight); sill.position.set(cx + dir*0.66, wy - 0.34, cz); g.add(sill);
   });
 
   // North curtain wall — banding + arrow slits on outer face
@@ -3079,12 +3475,39 @@ function buildCastle() {
     addBattlement(g, 66.5 + i * 1.0, 3.2, 22.7);
     addBattlement(g, 66.5 + i * 1.0, 3.2, 31.3);
   }
+  // Half-merlons between full battlements for crenellation variety
+  for (let i = 0; i < 4; i++) {
+    const hmN = mesh(box(0.22, 0.34, 0.30), M.castleLight); hmN.position.set(67.0 + i * 1.0, 3.17, 22.7); g.add(hmN);
+    const hmS = mesh(box(0.22, 0.34, 0.30), M.castleLight); hmS.position.set(67.0 + i * 1.0, 3.17, 31.3); g.add(hmS);
+  }
+  // Wall-walk coping course along the curtain walls
+  const copeN = mesh(box(6.1, 0.12, 0.72), M.castleLight); copeN.position.set(68.5, 3.02, 23); g.add(copeN);
+  const copeS = mesh(box(6.1, 0.12, 0.72), M.castleLight); copeS.position.set(68.5, 3.02, 31); g.add(copeS);
+  // East back wall battlements + coping (was bare)
+  for (let i = 0; i < 6; i++) addBattlement(g, 71.3, 3.2, 24.5 + i * 1.0);
+  const copeE = mesh(box(0.72, 0.12, 9.1), M.castleLight); copeE.position.set(71, 3.02, 27); g.add(copeE);
+  // Stepped buttresses bracing the curtain wall outer faces
+  [[67.7, 22.66],[69.7, 22.66],[67.7, 31.34],[69.7, 31.34]].forEach(([bx,bz]) => {
+    const lower = mesh(box(0.44, 1.4, 0.36), M.castleLight); lower.position.set(bx, 0.7, bz); g.add(lower);
+    const upper = mesh(box(0.30, 1.3, 0.26), M.castleStone); upper.position.set(bx, 1.95, bz); g.add(upper);
+    const cap = mesh(box(0.36, 0.10, 0.30), M.castleDark); cap.position.set(bx, 2.62, bz); g.add(cap);
+  });
   // Keep battlements
   const kbY = 10.1, kbR = 1.7;
   for (let i = 0; i < 10; i++) {
     const angle = (i / 10) * Math.PI * 2;
     addBattlement(g, 68.5 + Math.cos(angle) * kbR, kbY, 27 + Math.sin(angle) * kbR);
   }
+  // Keep spire — gold pinnacle above the flag, topped with a cyan beacon crystal
+  const spireCol = mesh(box(0.10, 1.5, 0.10), M.castleFlagPole); spireCol.position.set(68.5, 11.55, 27); g.add(spireCol);
+  const spireFit = mesh(box(0.26, 0.10, 0.26), M.swGold); spireFit.position.set(68.5, 10.98, 27); g.add(spireFit);
+  const spireCrystal = mesh(box(0.30, 0.44, 0.30), M.crystal); spireCrystal.position.set(68.5, 12.50, 27); g.add(spireCrystal);
+  const spireTip = mesh(box(0.14, 0.22, 0.14), M.crystal); spireTip.position.set(68.5, 12.82, 27); g.add(spireTip);
+  // Corner pinnacles with small crystal finials on the keep roof
+  [[66.8,25.3],[66.8,28.7],[70.2,25.3],[70.2,28.7]].forEach(([px,pz]) => {
+    const pin = mesh(box(0.26, 0.85, 0.26), M.castleLight); pin.position.set(px, 10.28, pz); g.add(pin);
+    const fin = mesh(box(0.14, 0.18, 0.14), M.crystal); fin.position.set(px, 10.79, pz); g.add(fin);
+  });
 
   // Flags
   addFlag(g, 66, 5.5, 23.0);
@@ -3092,6 +3515,11 @@ function buildCastle() {
   addFlag(g, 71, 5.0, 23.0);
   addFlag(g, 71, 5.0, 31.0);
   addFlag(g, 68.5, 9.75, 27);
+  // Gold-trimmed plinths anchoring each tower flag pole
+  [[66, 5.56, 23],[66, 5.56, 31],[71, 5.06, 23],[71, 5.06, 31]].forEach(([px,py,pz]) => {
+    const plinth = mesh(box(0.30, 0.16, 0.30), M.castleLight); plinth.position.set(px, py, pz); g.add(plinth);
+    const ptrim = mesh(box(0.16, 0.10, 0.16), M.swGold); ptrim.position.set(px, py + 0.10, pz); g.add(ptrim);
+  });
 
   // Wall-mounted torches flanking the gate openings
   const torchMat = new THREE.MeshStandardMaterial({ color: 0xff7700, emissive: 0xff5500, emissiveIntensity: 2.4 });
@@ -3113,6 +3541,11 @@ function buildCastle() {
     const tBS  = mesh(box(0.07, 0.18, 0.07), M.catWood); tBS.position.set(tx, 2.82, 30.7); g.add(tBS);
     const tFS  = new THREE.Mesh(box(0.08, 0.09, 0.08), torchMat); tFS.position.set(tx, 2.93, 30.7); g.add(tFS);
   }
+  // Heraldic crest on the centre gate lintel — Azure & Gold Order shield
+  const crestBack = mesh(box(0.08, 0.58, 0.48), M.castleDark); crestBack.position.set(65.70, 3.08, 27); g.add(crestBack);
+  const crest  = mesh(box(0.08, 0.46, 0.38), M.swShield); crest.position.set(65.66, 3.06, 27); g.add(crest);
+  const crestV = mesh(box(0.07, 0.40, 0.09), M.swGold); crestV.position.set(65.62, 3.06, 27); g.add(crestV);
+  const crestH = mesh(box(0.07, 0.09, 0.30), M.swGold); crestH.position.set(65.62, 3.14, 27); g.add(crestH);
   // Drawbridge planks (wooden floor across gate entrances)
   [25, 27, 29].forEach(tz => {
     for (let pi = 0; pi < 4; pi++) {
@@ -3125,6 +3558,16 @@ function buildCastle() {
   // Keep entrance arch + door
   const keepArch = mesh(box(0.16, 1.6, 1.0), M.castleDark); keepArch.position.set(66.92, 0.80, 27); g.add(keepArch);
   const keepDoor = mesh(box(0.10, 1.4, 0.80), M.catWood); keepDoor.position.set(66.88, 0.70, 27); g.add(keepDoor);
+  // Stone door frame proud of the keep face + torch sconces flanking the door
+  [26.45, 27.55].forEach(fz => {
+    const post = mesh(box(0.06, 1.7, 0.12), M.castleLight); post.position.set(66.72, 0.85, fz); g.add(post);
+  });
+  const doorBeam = mesh(box(0.06, 0.14, 1.3), M.castleLight); doorBeam.position.set(66.72, 1.76, 27); g.add(doorBeam);
+  [26.3, 27.7].forEach(tz => {
+    const brkK = mesh(box(0.10, 0.05, 0.08), bracketMat); brkK.position.set(66.68, 1.55, tz); g.add(brkK);
+    const tBK = mesh(box(0.07, 0.18, 0.07), M.catWood); tBK.position.set(66.68, 1.67, tz); g.add(tBK);
+    const tFK = new THREE.Mesh(box(0.08, 0.09, 0.08), torchMat); tFK.position.set(66.68, 1.78, tz); g.add(tFK);
+  });
   // Keep windows glow interior
   [
     [66.73, 5.5, 27],[70.27, 5.5, 27],
@@ -3133,6 +3576,15 @@ function buildCastle() {
   ].forEach(([wx,wy,wz]) => {
     const gWin = mesh(box(0.07, 0.40, 0.28), M.townWin); gWin.position.set(wx, wy, wz); g.add(gWin);
   });
+  // Royal banners hanging on the keep's west face — gold rod, long blue drop, swallow tail
+  [25.9, 28.1].forEach(bz => {
+    const rod = mesh(box(0.10, 0.08, 0.66), M.castleFlagPole); rod.position.set(66.68, 7.15, bz); g.add(rod);
+    const banner = mesh(box(0.06, 1.55, 0.52), M.castleFlag); banner.position.set(66.70, 6.32, bz); g.add(banner);
+    const tail = mesh(box(0.06, 0.22, 0.30), M.castleFlag); tail.position.set(66.70, 5.44, bz); g.add(tail);
+  });
+  // Gold Order crest plate high on the keep face
+  const crestKB = mesh(box(0.08, 0.62, 0.62), M.castleDark); crestKB.position.set(66.72, 8.65, 27); g.add(crestKB);
+  const crestKG = mesh(box(0.07, 0.46, 0.46), M.swGold); crestKG.position.set(66.68, 8.65, 27); g.add(crestKG);
   // Moat hint — sunken dark strip in front of gate wall (col 65)
   const moatMat = new THREE.MeshStandardMaterial({ color: 0x0a1a2e, emissive: 0x040c14, emissiveIntensity: 0.4 });
   for (let mz = 22; mz <= 32; mz++) {
@@ -3251,6 +3703,8 @@ function spawnTroll(chosenPath) {
   const body = mesh(box(0.75, 0.65, 0.5), M.trollMat); body.position.y = 0.75; g.add(body);
   // Crude chest plate
   const chest = mesh(box(0.50, 0.40, 0.08), M.catMetal); chest.position.set(0, 0.80, 0.27); g.add(chest);
+  // Belly plate strap — dark leather band cinched around the gut, holds the plate on
+  const bellyStrap = mesh(box(0.79, 0.10, 0.54), M.trollClub); bellyStrap.position.set(0, 0.56, 0); g.add(bellyStrap);
   // Spiked shoulder pads
   const padL = mesh(box(0.22, 0.16, 0.36), M.catMetal); padL.position.set( 0.52, 0.98, 0); g.add(padL);
   const padR = mesh(box(0.22, 0.16, 0.36), M.catMetal); padR.position.set(-0.52, 0.98, 0); g.add(padR);
@@ -3275,6 +3729,18 @@ function spawnTroll(chosenPath) {
   // Tusks
   const tuskL = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskL.position.set( 0.14, 1.14, 0.30); tuskL.rotation.z = -0.18; g.add(tuskL);
   const tuskR = mesh(box(0.07, 0.20, 0.07), M.orcTusk); tuskR.position.set(-0.14, 1.14, 0.30); tuskR.rotation.z = 0.18; g.add(tuskR);
+  // Protruding lower jaw and heavy chin
+  const trollJaw  = mesh(box(0.48, 0.10, 0.42), M.trollMat); trollJaw.position.set(0, 1.10, 0.06); trollJaw.rotation.x = 0.14; g.add(trollJaw);
+  const trollChin = mesh(box(0.30, 0.12, 0.16), M.trollMat); trollChin.position.set(0, 1.04, 0.34); g.add(trollChin);
+  // Battle-torn ears — wide flaps with a dark notch bitten out of the top of each
+  const earL = mesh(box(0.10, 0.24, 0.16), M.trollMat); earL.position.set( 0.34, 1.36, -0.06); earL.rotation.z =  0.22; g.add(earL);
+  const earR = mesh(box(0.10, 0.24, 0.16), M.trollMat); earR.position.set(-0.34, 1.36, -0.06); earR.rotation.z = -0.22; g.add(earR);
+  const notchL = mesh(box(0.11, 0.07, 0.09), M.trollClub); notchL.position.set( 0.37, 1.44, -0.10); g.add(notchL);
+  const notchR = mesh(box(0.11, 0.07, 0.09), M.trollClub); notchR.position.set(-0.37, 1.44, -0.10); g.add(notchR);
+  // Mossy back tufts — he's old and slow enough that things grow on him
+  [[0.20, 1.02, -0.26, 0.18],[-0.16, 0.90, -0.27, 0.14],[0.02, 0.70, -0.26, 0.16]].forEach(([px,py,pz,s]) => {
+    const moss = mesh(box(s, 0.08, 0.10), M.treeFoliage2); moss.position.set(px, py, pz); g.add(moss);
+  });
   _pushEnemy(g, 'troll', legL, legR, body, head, 1.95, chosenPath, armL, armR);
 }
 
@@ -3395,6 +3861,7 @@ function spawnWolf(chosenPath) {
   _pushEnemy(g, 'wolf', legFL, legBR, body, head, 0.95, chosenPath);
   const w = orcs[orcs.length - 1];
   w.legFR = legFR; w.legBL = legBL;
+  w.tailBase = tailBase; w.tailTip = tailTip; w.earL = earL; w.earR = earR; // stored for tail-wag + ear-flick
 }
 
 // Spider — 8-legged voxel creature
@@ -3417,6 +3884,7 @@ function spawnSpider(chosenPath) {
   const fL = mesh(box(0.05, 0.16, 0.05), M.skelBone); fL.position.set(0.47, 0.14, 0.08); fL.rotation.z = 0.3; g.add(fL);
   const fR = mesh(box(0.05, 0.16, 0.05), M.skelBone); fR.position.set(0.47, 0.14,-0.08); fR.rotation.z = 0.3; g.add(fR);
   // 8 legs — each has upper arm + lower arm + foot with 2-segment joints
+  const sLegs = []; // lower segs collected for alternating-tetrapod skitter
   for (let i = 0; i < 4; i++) {
     const xOff = 0.30 - i * 0.13;
     const spread = 0.30 + i * 0.05;
@@ -3435,6 +3903,9 @@ function spawnSpider(chosenPath) {
       const lower = mesh(box(0.22, 0.05, 0.05), bMat);
       lower.position.set(xOff - 0.04, 0.14, side * (spread + 0.14));
       lower.rotation.x = side * 1.1; lower.rotation.z = tiltZ * 0.5;
+      lower.userData.rz = tiltZ * 0.5;                  // rest pose for clean resets
+      lower.userData.ph = (i + (side > 0 ? 0 : 1)) % 2; // alternating-tetrapod group
+      sLegs.push(lower);
       g.add(lower);
       // Foot tip
       const foot = mesh(box(0.05, 0.09, 0.05), bMat);
@@ -3448,6 +3919,7 @@ function spawnSpider(chosenPath) {
     const eye = mesh(box(eyeSz,eyeSz,0.04), M.spiderEye); eye.position.set(x+0.20, y, z); g.add(eye);
   });
   _pushEnemy(g, 'spider', null, null, cthorax, abdomen, 0.7, chosenPath);
+  orcs[orcs.length - 1].spiderLegs = sLegs; // 8 lower-leg refs driven by the skitter cycle
 }
 
 // Cyclops — massive one-eyed brute
@@ -3462,6 +3934,10 @@ function spawnCyclops(chosenPath) {
   // Crude stone chest plate with ridge
   const chestPlate = mesh(box(0.80, 0.62, 0.10), M.catMetal); chestPlate.position.set(0, 1.10, 0.45); g.add(chestPlate);
   const chestRidge = mesh(box(0.10, 0.58, 0.12), M.catMetal); chestRidge.position.set(0, 1.10, 0.50); g.add(chestRidge);
+  // Back spine ridge — armour plates marching down the spine, big to small
+  [[1.52, 0.30],[1.24, 0.26],[0.98, 0.22]].forEach(([py, s]) => {
+    const ridgePlate = mesh(box(s, 0.16, 0.14), M.catMetal); ridgePlate.position.set(0, py, -0.44); g.add(ridgePlate);
+  });
   // Massive shoulder pads
   const padL = mesh(box(0.26, 0.22, 0.50), M.catMetal); padL.position.set( 0.82, 1.32, 0); g.add(padL);
   const padR = mesh(box(0.26, 0.22, 0.50), M.catMetal); padR.position.set(-0.82, 1.32, 0); g.add(padR);
@@ -3479,6 +3955,11 @@ function spawnCyclops(chosenPath) {
     const fist = mesh(box(0.50, 0.34, 0.50), M.cyclopMat); fist.position.set(0, -0.46, 0.02); arm.add(fist);
     const knuckles = mesh(box(0.50, 0.10, 0.16), M.catMetal); knuckles.position.set(0, -0.40, 0.24); arm.add(knuckles);
   });
+  // Escaped-captive wrist shackle with two links of snapped chain — parented to the left
+  // arm so it swings with the walk cycle
+  const shackle = mesh(box(0.52, 0.14, 0.52), M.catMetal); shackle.position.set(0, -0.26, 0); armL.add(shackle);
+  const linkA = mesh(box(0.09, 0.13, 0.06), M.catMetal); linkA.position.set(0.26, -0.36, 0.06); linkA.rotation.z =  0.25; armL.add(linkA);
+  const linkB = mesh(box(0.09, 0.13, 0.06), M.catMetal); linkB.position.set(0.32, -0.48, 0.06); linkB.rotation.z = -0.20; armL.add(linkB);
   // Giant mace
   const maceHandle = mesh(box(0.16, 1.0, 0.16), M.trollClub); maceHandle.position.set(0, -0.62, 0.22); armR.add(maceHandle);
   const maceHead   = mesh(box(0.6, 0.6, 0.6), M.trollClub); maceHead.position.set(0, -1.12, 0.22); armR.add(maceHead);
@@ -3495,6 +3976,9 @@ function spawnCyclops(chosenPath) {
   // Horns
   const hornL = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornL.position.set( 0.32, 2.42, 0); hornL.rotation.z =  0.35; g.add(hornL);
   const hornR = mesh(box(0.15, 0.4, 0.15), M.orcTusk); hornR.position.set(-0.32, 2.42, 0); hornR.rotation.z = -0.35; g.add(hornR);
+  // Underbite — two bone teeth jutting up over the lip from the jaw line
+  const uTuskL = mesh(box(0.11, 0.22, 0.09), M.orcTusk); uTuskL.position.set( 0.20, 1.52, 0.42); uTuskL.rotation.z = -0.10; g.add(uTuskL);
+  const uTuskR = mesh(box(0.11, 0.22, 0.09), M.orcTusk); uTuskR.position.set(-0.20, 1.52, 0.42); uTuskR.rotation.z =  0.10; g.add(uTuskR);
   _pushEnemy(g, 'cyclops', legL, legR, body, head, 2.7, chosenPath, armL, armR);
 }
 
@@ -3634,6 +4118,13 @@ function spawnGenericOrc(orcType, chosenPath) {
     const gsGuard = mesh(box(0.46, 0.09, 0.09), M.catMetal); gsGuard.position.set(-0.04, -0.14, 0.08); armR.add(gsGuard);
     const gsBlade = mesh(box(0.09, 0.72, 0.06), M.weapon); gsBlade.position.set(-0.04,  0.28, 0.08); armR.add(gsBlade);
     const gsTip   = mesh(box(0.06, 0.18, 0.04), M.weapon); gsTip.position.set(-0.04,  0.70, 0.08); armR.add(gsTip);
+    // Dramatic dark cape with gold clasp
+    const capeClipBar = mesh(box(0.54, 0.05, 0.06), M.catMetal); capeClipBar.position.set(0, 0.96, -0.23); g.add(capeClipBar);
+    const capeTop  = mesh(box(0.50, 0.30, 0.07), M.castleDark); capeTop.position.set(0, 0.80, -0.24); g.add(capeTop);
+    const capeMid  = mesh(box(0.48, 0.30, 0.07), M.castleDark); capeMid.position.set(0, 0.54, -0.25); g.add(capeMid);
+    const capeTail = mesh(box(0.44, 0.22, 0.07), M.castleDark); capeTail.position.set(0, 0.28, -0.26); g.add(capeTail);
+    const capeGoldL = mesh(box(0.04, 0.86, 0.07), M.castleFlagPole); capeGoldL.position.set( 0.26, 0.56, -0.24); g.add(capeGoldL);
+    const capeGoldR = mesh(box(0.04, 0.86, 0.07), M.castleFlagPole); capeGoldR.position.set(-0.26, 0.56, -0.24); g.add(capeGoldR);
   }
 
   const headSize = orcType === 'boss' ? 0.50 : 0.44;
@@ -3643,6 +4134,15 @@ function spawnGenericOrc(orcType, chosenPath) {
   const eR = mesh(box(0.1,0.08,0.07), eyeMat); eR.position.set(-0.13, 1.22, 0.23); g.add(eR);
   const tL = mesh(box(0.07,0.16,0.07), M.orcTusk); tL.position.set( 0.10, 1.01, 0.21); tL.rotation.z =  0.15; g.add(tL);
   const tR = mesh(box(0.07,0.16,0.07), M.orcTusk); tR.position.set(-0.10, 1.01, 0.21); tR.rotation.z = -0.15; g.add(tR);
+  // Lower jaw with visible bottom teeth
+  const jawW = headSize * 0.72;
+  const jaw = mesh(box(jawW, 0.08, jawW * 0.96), headMat); jaw.position.set(0, 1.03, 0.04); jaw.rotation.x = 0.12; g.add(jaw);
+  const jawTeethCount = orcType === 'boss' ? 4 : 3;
+  for (let ti = 0; ti < jawTeethCount; ti++) {
+    const jt = mesh(box(0.055, 0.09, 0.055), M.orcTusk);
+    jt.position.set(-0.085 + ti * (0.17 / (jawTeethCount - 1)), 0.97, 0.21);
+    g.add(jt);
+  }
   // Pointed orc ears jutting from the sides of the head
   const earOff = headSize * 0.52;
   const earL = mesh(box(0.07, 0.20, 0.11), headMat); earL.position.set( earOff, 1.22, -0.02); earL.rotation.z = -0.5; g.add(earL);
@@ -3777,6 +4277,19 @@ function spawnHealerOrc(chosenPath) {
   const head = mesh(box(0.42, 0.40, 0.40), bMat); head.position.y = 1.10; g.add(head);
   // Bone headband
   const hband = mesh(box(0.48, 0.10, 0.10), M.orcTusk); hband.position.set(0, 1.30, 0.22); g.add(hband);
+  // Bone headdress — 3 upright spikes rising from headband
+  [[0, 0.30, 0], [-0.16, 0.22, 0.14], [0.16, 0.22, -0.14]].forEach(([hx, hy, rz]) => {
+    const hspike = mesh(box(0.06, hy, 0.06), M.orcTusk);
+    hspike.position.set(hx, 1.30 + hy * 0.5, 0.18);
+    hspike.rotation.z = hx * 1.1;
+    g.add(hspike);
+  });
+  // Side curved horns on headband
+  const hornL = mesh(box(0.05, 0.16, 0.05), M.orcTusk); hornL.position.set( 0.27, 1.35, 0.10); hornL.rotation.z =  0.65; g.add(hornL);
+  const hornR = mesh(box(0.05, 0.16, 0.05), M.orcTusk); hornR.position.set(-0.27, 1.35, 0.10); hornR.rotation.z = -0.65; g.add(hornR);
+  // Small worn tusks (shaman's teeth, shorter than warrior tusks)
+  const htL = mesh(box(0.045, 0.11, 0.045), M.orcTusk); htL.position.set( 0.08, 0.98, 0.22); htL.rotation.z =  0.12; g.add(htL);
+  const htR = mesh(box(0.045, 0.11, 0.045), M.orcTusk); htR.position.set(-0.08, 0.98, 0.22); htR.rotation.z = -0.12; g.add(htR);
   const eL = mesh(box(0.09, 0.08, 0.07), M.orcEye); eL.position.set( 0.13, 1.14, 0.21); g.add(eL);
   const eR = mesh(box(0.09, 0.08, 0.07), M.orcEye); eR.position.set(-0.13, 1.14, 0.21); g.add(eR);
   _pushEnemy(g, 'healerOrc', legL, legR, body, head, 1.60, chosenPath, armL, armR);
@@ -3828,6 +4341,11 @@ function spawnOrcMage(chosenPath) {
   const hatMid  = mesh(box(0.40, 0.26, 0.40), hMat); hatMid.position.y = 1.96; g.add(hatMid);
   const hatTop  = mesh(box(0.24, 0.22, 0.24), hMat); hatTop.position.y = 2.16; g.add(hatTop);
   const hatTip  = mesh(box(0.10, 0.18, 0.10), hMat); hatTip.position.y = 2.30; g.add(hatTip);
+  // Bone skull trophy wired to the hat brim
+  const skullF  = mesh(box(0.13, 0.11, 0.11), M.orcTusk); skullF.position.set(-0.34, 1.59, 0.24); g.add(skullF);
+  const skullEL = mesh(box(0.03, 0.04, 0.04), M.castleDark); skullEL.position.set(-0.31, 1.61, 0.29); g.add(skullEL);
+  const skullER = mesh(box(0.03, 0.04, 0.04), M.castleDark); skullER.position.set(-0.37, 1.61, 0.29); g.add(skullER);
+  const skullJaw = mesh(box(0.10, 0.05, 0.09), M.orcTusk); skullJaw.position.set(-0.34, 1.53, 0.26); skullJaw.rotation.x = 0.15; g.add(skullJaw);
   // Staff — parented to armR so it rotates with the arm
   const staffPivot = new THREE.Group(); staffPivot.position.set(0, -0.18, 0.05); armR.add(staffPivot);
   const sShaft1 = mesh(box(0.07, 0.50, 0.07), M.mageStaff); sShaft1.position.y = 0.00; staffPivot.add(sShaft1);
@@ -3860,6 +4378,19 @@ function spawnRockTroll(chosenPath) {
   [[0.72,1.22,0.10],[0.60,1.28,-0.08],[-0.72,1.22,0.10],[-0.60,1.28,-0.08]].forEach(([px,py,pz]) => {
     const chip = mesh(box(0.12, 0.10, 0.10), M.catMetal); chip.position.set(px, py, pz); g.add(chip);
   });
+  // Craggy rock protrusions on body — jagged stone skin
+  [[0.36, 0.98, 0.33],[-0.28, 1.10, 0.30],[0.08, 0.72, 0.34],[-0.22, 0.80, 0.34]].forEach(([px,py,pz]) => {
+    const rk = mesh(box(0.11, 0.11, 0.09), M.rockTrollMat); rk.position.set(px, py, pz); g.add(rk);
+  });
+  // Glowing magma cracks — thin molten seams splitting the stone hide (same glow as the eyes)
+  [[0.18, 0.96, 0.5],[-0.10, 0.78, -0.6],[0.30, 1.08, -0.3]].forEach(([px,py,rz]) => {
+    const crack = mesh(box(0.05, 0.30, 0.04), M.rockTrollEye); crack.position.set(px, py, 0.30); crack.rotation.z = rz; g.add(crack);
+  });
+  // One crack on the left shin — parented to the leg so it strides with the walk
+  const crackLeg = mesh(box(0.05, 0.24, 0.04), M.rockTrollEye); crackLeg.position.set(0.04, 0, 0.18); crackLeg.rotation.z = 0.5; legL.add(crackLeg);
+  // Rock knuckle ridges on forearms
+  const rkKnuckleL = mesh(box(0.13, 0.11, 0.18), M.catMetal); rkKnuckleL.position.set( 0.64, 0.95, 0.19); g.add(rkKnuckleL);
+  const rkKnuckleR = mesh(box(0.13, 0.11, 0.18), M.catMetal); rkKnuckleR.position.set(-0.64, 0.95, 0.19); g.add(rkKnuckleR);
   const armL = mesh(box(0.34, 0.72, 0.34), M.rockTrollMat); armL.position.set( 0.64, 0.78, 0); g.add(armL);
   const armR = mesh(box(0.34, 0.72, 0.34), M.rockTrollMat); armR.position.set(-0.64, 0.78, 0); g.add(armR);
   // Boulder in right hand
@@ -3875,6 +4406,11 @@ function spawnRockTroll(chosenPath) {
   [[0.12,1.30,0.36],[0,1.28,0.38],[-0.12,1.30,0.36]].forEach(([px,py,pz]) => {
     const t = mesh(box(0.08, 0.18, 0.08), M.catMetal); t.position.set(px, py, pz); g.add(t);
   });
+  // Crystal outcrops — jagged glowing shards jutting from the shoulder boulders and back
+  const shardL = mesh(box(0.11, 0.30, 0.11), M.rockTrollEye); shardL.position.set( 0.68, 1.30, 0); shardL.rotation.z =  0.30; g.add(shardL);
+  const shardR = mesh(box(0.11, 0.30, 0.11), M.rockTrollEye); shardR.position.set(-0.68, 1.30, 0); shardR.rotation.z = -0.30; g.add(shardR);
+  const shardB1 = mesh(box(0.13, 0.34, 0.13), M.rockTrollEye); shardB1.position.set( 0.16, 1.18, -0.34); shardB1.rotation.x = -0.40; g.add(shardB1);
+  const shardB2 = mesh(box(0.10, 0.26, 0.10), M.rockTrollEye); shardB2.position.set(-0.20, 1.04, -0.34); shardB2.rotation.x = -0.35; g.add(shardB2);
   _pushEnemy(g, 'rockTroll', legL, legR, body, head, 2.3, chosenPath, armL, armR);
 }
 
@@ -3933,7 +4469,8 @@ function spawnOrc(orcType) {
 // ─────────────────────────────────────────────
 //  LEVEL BOSS — unique end-of-level boss.
 //  Builds on the generic 'boss' mesh, then post-processes materials (body + head clones of
-//  M.bossBody, identifiable by original color 0x200832) to apply a level-specific tint.
+//  M.bossBody, identified by matching its current palette hex — see baseColor below, which
+//  must stay in sync with M.bossBody) to apply a level-specific tint.
 //  Scale, HP, reward, and castle damage are all multiplied so each boss feels like a fight.
 // ─────────────────────────────────────────────
 function spawnLevelBoss(chosenPath) {
@@ -3947,14 +4484,38 @@ function spawnLevelBoss(chosenPath) {
   const newScale = (o.scale || 1) * (cfg.scale || 1.5);
   o.group.scale.setScalar(newScale);
   o.scale = newScale;
-  // Recolor only the cloned body+head materials (original boss color is 0x200832)
-  const baseColor = 0x200832;
+  // Recolor only the cloned body+head materials. MUST match M.bossBody's current hex —
+  // this silently broke once before when the palette shifted (#200832 → #2a0820) and every
+  // level boss lost its signature color. Keep in sync with the bossBody entry in M.
+  const baseColor = 0x2a0820;
   const targetCol = new THREE.Color(cfg.bodyColor);
   o.group.traverse(m => {
     if (m.isMesh && m.material && m.material.color && m.material.color.getHex() === baseColor) {
       m.material.color.copy(targetCol);
     }
   });
+  // ── Boss regalia — layered on the generic boss model so the level boss reads at a distance ──
+  const g = o.group;
+  // Swept-back bone horns flanking the crown
+  const hornL = mesh(box(0.09, 0.30, 0.09), M.orcTusk); hornL.position.set( 0.29, 1.40, -0.06); hornL.rotation.z = -0.65; g.add(hornL);
+  const hornR = mesh(box(0.09, 0.30, 0.09), M.orcTusk); hornR.position.set(-0.29, 1.40, -0.06); hornR.rotation.z =  0.65; g.add(hornR);
+  // Glowing rune sigil on the breastplate in the boss's signature eye color (same inline-material
+  // pattern as the crown gem; per-boss clone so disposeGroup frees it with the unit)
+  const sigilMat = new THREE.MeshStandardMaterial({ color: cfg.eyeColor, emissive: cfg.eyeColor, emissiveIntensity: 2.2 });
+  const sigilV = mesh(box(0.09, 0.30, 0.03), sigilMat); sigilV.position.set(0, 0.72, 0.27); g.add(sigilV);
+  const sigilH = mesh(box(0.26, 0.08, 0.03), sigilMat); sigilH.position.set(0, 0.80, 0.27); g.add(sigilH);
+  // Bone spikes jutting from the shoulder plates
+  const spikeSL = mesh(box(0.09, 0.28, 0.09), M.orcTusk); spikeSL.position.set( 0.48, 1.06, 0); spikeSL.rotation.z = -0.3; g.add(spikeSL);
+  const spikeSR = mesh(box(0.09, 0.28, 0.09), M.orcTusk); spikeSR.position.set(-0.48, 1.06, 0); spikeSR.rotation.z =  0.3; g.add(spikeSR);
+  // Heavy gauntlet cuffs — parented to the arms so they swing with each stride
+  [o.armL, o.armR].forEach(arm => {
+    const cuff = mesh(box(0.30, 0.16, 0.30), M.catMetal); cuff.position.set(0, -0.14, 0.01); arm.add(cuff);
+  });
+  // War standard rising over the cape: wood pole, metal crossbar, blood-crimson banner + glowing emblem
+  const stdPole  = mesh(box(0.06, 1.15, 0.06), M.trollClub);   stdPole.position.set(0, 1.35, -0.31); g.add(stdPole);
+  const stdBar   = mesh(box(0.44, 0.06, 0.06), M.catMetal);    stdBar.position.set(0, 1.86, -0.31); g.add(stdBar);
+  const stdCloth = mesh(box(0.40, 0.52, 0.05), M.orcMageRobe); stdCloth.position.set(0, 1.56, -0.37); g.add(stdCloth);
+  const stdSigil = mesh(box(0.16, 0.16, 0.03), sigilMat);      stdSigil.position.set(0, 1.56, -0.41); g.add(stdSigil);
   // HP + reward + castle damage multipliers (maxHp already has difficulty scaling baked in)
   const bossHp = Math.max(1, Math.round(o.maxHp * (cfg.hpMult || 3)));
   o.hp = bossHp; o.maxHp = bossHp;
@@ -4033,13 +4594,20 @@ function releaseAttackSlot(def, orc) {
   const s = defenderSlots.get(def);
   const i = s.indexOf(orc); if (i >= 0) s[i] = null;
 }
+// Both clamp the slot index to >= 0. acquireAttackSlot returns -1 for "defender is
+// full", and a -1 reaching here is pathological: Math.floor(-1/4) is -1, not 0, so
+// the ring term cancels the base distance and the stand-off collapses to 0.15*scale
+// — placing the attacker inside the defender's own model. The call sites now gate on
+// >= 0, so this is a backstop rather than the primary fix.
 function attackSlotDist(slotIdx, scale) {
-  return 1.0 + Math.floor(slotIdx / 4) * 1.0 + 0.15 * scale;
+  const i = Math.max(0, slotIdx);
+  return 1.0 + Math.floor(i / 4) * 1.0 + 0.15 * scale;
 }
 function attackSlotPos(def, slotIdx, scale) {
-  const ring = Math.floor(slotIdx / 4);
-  const angle = (slotIdx % 4) * Math.PI * 0.5 + (ring % 2 === 1 ? Math.PI / 4 : 0);
-  const dist = attackSlotDist(slotIdx, scale);
+  const i = Math.max(0, slotIdx);
+  const ring = Math.floor(i / 4);
+  const angle = (i % 4) * Math.PI * 0.5 + (ring % 2 === 1 ? Math.PI / 4 : 0);
+  const dist = attackSlotDist(i, scale);
   return new THREE.Vector3(
     def.group.position.x + Math.sin(angle) * dist, 0,
     def.group.position.z + Math.cos(angle) * dist
@@ -4074,7 +4642,15 @@ function _wallBlocksPath(fromPos, toPos) {
 function findDefenderInRange(pos, range) {
   let best = null, bestD2 = range * range;
   for (const d of defenders) {
-    if (!d.alive || d.type === 'wall') continue;
+    // Walls are handled by the dedicated path-blocking code, and a spiketrap is a
+    // floor hazard, not a melee target — it has hp 9999 and cannot be sold. While it
+    // was targetable, any enemy that wandered into melee range latched onto it as
+    // fightingDefender and hammered an invulnerable object forever: it never advanced,
+    // never died, and never escaped. A smoke test of 6 grunts vs 3 traps sat at
+    // "1 killed, 5 remaining" for a full 60 seconds, unchanged by doubling the traps.
+    // It also flattered spiketrap enormously in the balance tooling — permanently
+    // wedged enemies mean zero escapes, which the old verdict logic scored as a WIN.
+    if (!d.alive || d.type === 'wall' || d.type === 'spiketrap') continue;
     const d2 = pos.distanceToSquared(d.group.position);
     if (d2 <= bestD2 && !_wallBlocksPath(pos, d.group.position)) { best = d; bestD2 = d2; }
   }
@@ -4097,7 +4673,7 @@ function findTowerInRange(pos, range) {
 //  SOUND SYSTEM  (Web Audio API — fully procedural, no files)
 // ─────────────────────────────────────────────
 const SND = (() => {
-  let ctx = null, master = null, lastHitMs = 0, _lastGruntMs = 0;
+  let ctx = null, master = null, lastHitMs = 0, _lastGruntMs = 0, _lastEnemyHitMs = 0;
   let musicGain = null, _musicPlaying = false, _musicNodes = [];
   let _chipSong = null, _chipMelStep = 0, _chipBassStep = 0, _chipPercBeat = 0, _chipHarStep = 0, _chipArpStep = 0;
   let _chipMelSection = 0; // index into the active song's `form` — drives A/B/C melody variation
@@ -4152,11 +4728,24 @@ const SND = (() => {
   }
 
   // ── CHIP-TUNE MUSIC ENGINE ────────────────────────────────────────────
-  const _NOTE = {
-    C3:130.8,D3:146.8,E3:164.8,F3:174.6,Fs3:185.0,G3:196.0,A3:220.0,Bb3:233.1,B3:246.9,
-    C4:261.6,Cs4:277.2,D4:293.7,E4:329.6,F4:349.2,Fs4:370.0,G4:392.0,A4:440.0,Bb4:466.2,B4:493.9,
-    C5:523.3,Cs5:554.4,D5:587.3,E5:659.3,F5:698.5,Fs5:740.0,G5:784.0,A5:880.0,B5:987.8,
-  };
+  // Chromatic note table, C2–B6, generated rather than hand-listed. A melody that
+  // names a pitch the table lacks turns into a silent rest with no error, which is
+  // an awful way to lose half a tune — generating it means every spelling resolves.
+  // Sharps use 's' (Fs4), flats use 'b' (Bb4); both spellings of a pitch are present.
+  const _NOTE = (() => {
+    const SHARP = ['C','Cs','D','Ds','E','F','Fs','G','Gs','A','As','B'];
+    const FLAT  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+    const t = {};
+    for (let oct = 1; oct <= 6; oct++) {   // oct 1 reaches the Abyss sub-bass (G1 ≈ 49 Hz)
+      for (let i = 0; i < 12; i++) {
+        const midi = (oct + 1) * 12 + i;             // A4 = MIDI 69 = 440 Hz
+        const hz = 440 * Math.pow(2, (midi - 69) / 12);
+        t[SHARP[i] + oct] = hz;
+        t[FLAT[i]  + oct] = hz;
+      }
+    }
+    return t;
+  })();
   // mel/melB/melC = melody phrases, har = harmony, bas = bass, arp = fast sparkle.
   // `form` sequences the melody phrases (A/B/C) so the tune evolves instead of looping one
   // 8-bar phrase forever — har/bas/arp loop underneath as a steady accompaniment.
@@ -4422,6 +5011,228 @@ const SND = (() => {
         ['A4',0.5],['C5',0.5],['E5',0.5],['A4',0.5],
       ],
     },
+    frost: { // D Lydian — "Frozen Reach" — crystalline, still, wide-open (94 BPM)
+      // Lydian's raised 4th (G#) is the whole point: it keeps the key major and
+      // bright but leaves it unresolved and glassy rather than warm.
+      bpm: 94, form:['A','A','B','A','C'],
+      voice: { mel:'glass', pad:'glacier', bass:'sub', arp:'ice', kit:'ice', sparkle:false },
+      mel:[
+        ['D5',2],['A5',2],
+        ['Gs5',1],['Fs5',1],['E5',2],
+        ['Fs5',1],['E5',1],['D5',2],
+        ['A4',2],['rest',2],
+        ['E5',2],['Fs5',2],
+        ['A5',1],['Gs5',1],['Fs5',2],
+        ['E5',1],['D5',1],['B4',2],
+        ['D5',4],
+      ],
+      // B — drifts up into the top octave and hangs there, thinning out
+      melB:[
+        ['A5',2],['B5',2],
+        ['Cs6',1],['B5',1],['A5',2],
+        ['Fs5',2],['Gs5',2],
+        ['A5',3],['rest',1],
+        ['E5',1],['Fs5',1],['Gs5',1],['A5',1],
+        ['B5',4],
+      ],
+      // C — bare descent, almost no accompaniment left
+      melC:[
+        ['B5',1],['A5',1],['Gs5',2],
+        ['Fs5',1],['E5',1],['D5',2],
+        ['Cs5',2],['B4',2],
+        ['D5',4],
+      ],
+      har:[
+        ['D4',4],['A3',4],
+        ['B3',4],['Gs3',4],
+        ['E4',4],['Fs4',4],
+        ['A3',4],['D4',4],
+      ],
+      bas:[
+        ['D2',4],['A2',4],
+        ['B2',4],['E2',4],
+        ['Fs2',4],['D2',4],
+        ['A2',4],['D2',4],
+      ],
+      arp:[
+        ['D5',1],['Fs5',1],['A5',1],['B5',1],
+        ['A5',1],['Fs5',1],['E5',1],['D5',1],
+        ['Gs5',1],['B5',1],['Cs6',1],['B5',1],
+        ['A5',1],['Fs5',1],['D5',1],['A4',1],
+      ],
+    },
+    ember: { // F# Phrygian dominant — "Molten Depths" — heavy, volcanic (150 BPM)
+      // Phrygian dominant (F# G A# B C# D E) — the b2 against a major 3rd is the
+      // classic "dangerous heat" sound: exotic, unstable, always about to erupt.
+      bpm: 150, form:['A','A','B','A','C','B'],
+      voice: { mel:'brass', pad:'organ', bass:'growl', arp:'ash', kit:'industrial', sparkle:false },
+      mel:[
+        ['Fs4',1],['G4',0.5],['As4',0.5],['B4',1],['As4',1],
+        ['G4',1],['Fs4',2],['Cs5',1],
+        ['D5',0.5],['Cs5',0.5],['B4',1],['As4',1],['G4',1],
+        ['Fs4',3],['rest',1],
+        ['B4',1],['Cs5',0.5],['D5',0.5],['E5',1],['D5',1],
+        ['Cs5',1],['B4',2],['As4',1],
+        ['G4',0.5],['Fs4',0.5],['E4',1],['Fs4',2],
+        ['Fs4',4],
+      ],
+      // B — climbs the octave and hammers the flat-2nd
+      melB:[
+        ['Fs5',1],['G5',0.5],['Fs5',0.5],['E5',1],['D5',1],
+        ['Cs5',1],['B4',1],['As4',2],
+        ['B4',0.5],['Cs5',0.5],['D5',1],['E5',1],['Fs5',1],
+        ['G5',2],['Fs5',2],
+      ],
+      // C — grinding low answer, all weight, no melody
+      melC:[
+        ['Fs4',2],['E4',2],
+        ['D4',2],['Cs4',2],
+        ['B3',1],['Cs4',1],['D4',1],['E4',1],
+        ['Fs4',4],
+      ],
+      har:[
+        ['Fs3',2],['D4',2],['Cs4',2],['As3',2],
+        ['B3',2],['G3',2],['Cs4',2],['Fs3',4],
+      ],
+      bas:[
+        ['Fs2',1],['Fs2',1],['G2',2],
+        ['Cs2',1],['Cs2',1],['D2',2],
+        ['B2',2],['As2',2],
+        ['Cs2',2],['Fs2',2],
+      ],
+      arp:[
+        ['Fs4',0.5],['As4',0.5],['Cs5',0.5],['Fs5',0.5],
+        ['Cs5',0.5],['As4',0.5],['G4',0.5],['Fs4',0.5],
+        ['B4',0.5],['D5',0.5],['Fs5',0.5],['D5',0.5],
+        ['Cs5',0.5],['As4',0.5],['Fs4',0.5],['Cs4',0.5],
+      ],
+    },
+    abyss: { // C Minor — "Void Sovereign" — vast, slow, crushing (82 BPM)
+      // Deliberately the slowest track in the game. Level 5 previously reused the
+      // `dark` escalation cue as its base, so the music never changed when the
+      // fight turned — this gives the Abyss its own floor to escalate away from.
+      bpm: 82, form:['A','B','A','C'],
+      voice: { mel:'choir', pad:'choir', bass:'sub', arp:'none', kit:'taiko', sparkle:false },
+      mel:[
+        ['C4',3],['Eb4',1],
+        ['G4',2],['F4',2],
+        ['Eb4',3],['D4',1],
+        ['C4',4],
+        ['G4',2],['Ab4',2],
+        ['Bb4',3],['G4',1],
+        ['F4',2],['Eb4',2],
+        ['C4',4],
+      ],
+      // B — the one place the voice climbs; still no resolution
+      melB:[
+        ['Eb5',2],['D5',2],
+        ['C5',3],['Bb4',1],
+        ['Ab4',2],['G4',2],
+        ['F4',4],
+        ['G4',2],['Ab4',2],
+        ['G4',4],
+      ],
+      // C — sinks below the opening, ends unresolved on the fifth
+      melC:[
+        ['C4',2],['Bb3',2],
+        ['Ab3',3],['G3',1],
+        ['F3',2],['Eb3',2],
+        ['G3',6],['rest',2],
+      ],
+      // Pad sits a full octave under the melody (which lives C4–Eb5). Written in
+      // the melody's own register it read as a second voice competing with the
+      // tune rather than as harmony beneath it.
+      har:[
+        ['C3',4],['Ab2',4],
+        ['Eb3',4],['Bb2',4],
+        ['F2',4],['G2',4],
+        ['Ab2',4],['C3',4],
+      ],
+      bas:[
+        ['C2',4],['Ab1',4],
+        ['Eb2',4],['Bb1',4],
+        ['F2',4],['G1',4],
+        ['Ab1',4],['C2',4],
+      ],
+    },
+    doom: { // E Locrian-ish minor — "Doomspire" — relentless, industrial (162 BPM)
+      bpm: 162, form:['A','A','B','A','C','A'],
+      voice: { mel:'brass', pad:'organ', bass:'growl', arp:'digital', kit:'industrial', sparkle:false },
+      mel:[
+        ['E4',0.5],['F4',0.5],['E4',1],['Bb4',1],['A4',1],
+        ['G4',0.5],['F4',0.5],['E4',2],['E4',1],
+        ['Bb4',1],['A4',0.5],['G4',0.5],['F4',1],['E4',1],
+        ['E4',3],['rest',1],
+      ],
+      melB:[
+        ['E5',1],['D5',0.5],['C5',0.5],['Bb4',1],['A4',1],
+        ['G4',1],['F4',1],['E4',2],
+        ['A4',0.5],['Bb4',0.5],['C5',1],['D5',1],['E5',1],
+        ['E5',2],['Bb4',2],
+      ],
+      melC:[
+        ['E4',1],['E4',0.5],['E4',0.5],['G4',1],['F4',1],
+        ['E4',1],['Bb3',1],['E4',2],
+        ['F4',0.5],['E4',0.5],['D4',1],['C4',1],['Bb3',1],
+        ['E4',4],
+      ],
+      // Organ stacks 1.5×/2×/3× above the written note, so writing the pad in the
+      // melody's octave put its upper partials right on top of the tune.
+      har:[
+        ['E3',2],['Bb2',2],['C3',2],['A2',2],
+        ['G2',2],['F2',2],['Bb2',2],['E3',4],
+      ],
+      bas:[
+        ['E2',1],['E2',1],['Bb2',2],
+        ['C2',1],['C2',1],['A2',2],
+        ['G2',2],['F2',2],
+        ['Bb2',2],['E2',2],
+      ],
+      arp:[
+        ['E5',0.5],['Bb4',0.5],['E5',0.5],['G5',0.5],
+        ['F5',0.5],['E5',0.5],['C5',0.5],['Bb4',0.5],
+        ['A4',0.5],['C5',0.5],['E5',0.5],['G5',0.5],
+        ['F5',0.5],['D5',0.5],['Bb4',0.5],['E4',0.5],
+      ],
+    },
+    vibe: { // A Mixolydian — "Neon Ramparts" — upbeat, synthwave (124 BPM)
+      bpm: 124, form:['A','A','B','A','C','B'],
+      voice: { mel:'lead', pad:'saw', bass:'pluck', arp:'digital', kit:'electro' },
+      mel:[
+        ['A4',0.5],['B4',0.5],['Cs5',1],['E5',1],['D5',1],
+        ['Cs5',0.5],['B4',0.5],['A4',1],['G4',2],
+        ['A4',0.5],['Cs5',0.5],['E5',1],['Fs5',1],['E5',1],
+        ['D5',0.5],['Cs5',0.5],['B4',1],['A4',2],
+      ],
+      melB:[
+        ['E5',1],['Fs5',0.5],['G5',0.5],['Fs5',1],['E5',1],
+        ['D5',1],['Cs5',1],['B4',2],
+        ['Cs5',0.5],['D5',0.5],['E5',1],['G5',1],['Fs5',1],
+        ['E5',2],['A5',2],
+      ],
+      melC:[
+        ['A5',1],['G5',1],['E5',1],['D5',1],
+        ['Cs5',0.5],['B4',0.5],['A4',1],['B4',2],
+        ['D5',1],['Cs5',1],['B4',1],['A4',1],
+        ['A4',4],
+      ],
+      har:[
+        ['A3',2],['G3',2],['D4',2],['E4',2],
+        ['Fs3',2],['G3',2],['A3',2],['E4',4],
+      ],
+      bas:[
+        ['A2',1],['A2',0.5],['A2',0.5],['G2',2],
+        ['D2',1],['D2',0.5],['D2',0.5],['E2',2],
+        ['Fs2',2],['G2',2],
+        ['A2',2],['E2',2],
+      ],
+      arp:[
+        ['A4',0.5],['Cs5',0.5],['E5',0.5],['A5',0.5],
+        ['G4',0.5],['B4',0.5],['D5',0.5],['G5',0.5],
+        ['D4',0.5],['Fs4',0.5],['A4',0.5],['D5',0.5],
+        ['E4',0.5],['Gs4',0.5],['B4',0.5],['E5',0.5],
+      ],
+    },
     switchback: { // A Minor — "Hero's Quest" — flowing, adventurous (118 BPM)
       bpm: 118, form:['A','A','B','A'],
       mel:[
@@ -4463,6 +5274,9 @@ const SND = (() => {
   const _DARK_VARIANT = {
     blitz:'comb', classic:'switchback', wide:'switchback', bazaar:'dark',
     comb:'dark', switchback:'dark', dark:'danger', danger:'danger',
+    // New biome tracks: on Hard, push each toward its own darker cousin rather
+    // than dumping every biome into the same generic `dark`.
+    frost:'switchback', ember:'doom', abyss:'doom', doom:'danger', vibe:'comb',
   };
 
   // ── Ensure melody delay chain exists (echo effect) ──
@@ -4482,13 +5296,117 @@ const SND = (() => {
     return _melDelayNode;
   }
 
-  // ── Marimba/bell melody — vibrato + echo (Terraria-style) ──
-  function _playMelNote(freq, durBeats, bpm) {
+  // ── Melody voices ────────────────────────────────────────────────────────
+  // Every track used to share one marimba/bell patch, so all eight biomes sounded
+  // like the same band playing different notes. Each song now names a `voice`;
+  // omit it and you get 'bell', which is byte-for-byte the original patch.
+  function _playMelNote(freq, durBeats, bpm, voice) {
     if (!musicGain) return;
     const c = getCtx(), now = c.currentTime;
     const dur = (60 / bpm) * durBeats * 0.78;
     const melDelay = _getMelOut(bpm);
-    // Fundamental sine
+    // Only the FUNDAMENTAL may feed the echo bus. The delay is a feedback loop
+    // (0.22), so routing every harmonic partial into it stacks repeats of a dense
+    // stack on top of each other and the track starts to sound like two songs
+    // playing at once. Partials stay dry — same rule the original bell patch used.
+    const out    = (g) => { g.connect(musicGain); if (melDelay) g.connect(melDelay); };
+    const outDry = (g) => { g.connect(musicGain); };
+
+    if (voice === 'glass') {
+      // Icelands — struck glass: pure fundamental, long ringing decay, high
+      // inharmonic partials, no vibrato. Sparse and crystalline.
+      // Ring no longer than the note itself — a tail that outlasts the next note
+      // reads as a second melody rather than as resonance.
+      const dl = Math.min(Math.max(dur, 0.45), dur * 0.95 + 0.25);
+      const o1 = c.createOscillator(), g1 = c.createGain();
+      o1.type = 'sine'; o1.frequency.value = freq;
+      g1.gain.setValueAtTime(0, now);
+      g1.gain.linearRampToValueAtTime(0.070, now + 0.004);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + dl);
+      o1.connect(g1); out(g1); o1.start(now); o1.stop(now + dl + 0.05);
+      // Shimmering upper partials — the "ice" character. Dry only.
+      [[2.0, 0.026, 0.7], [3.0, 0.013, 0.42], [4.76, 0.009, 0.26], [6.8, 0.005, 0.16]].forEach(([m, amp, len]) => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sine'; o.frequency.value = freq * m;
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(amp, now + 0.003);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dl * len);
+        o.connect(g); outDry(g); o.start(now); o.stop(now + dl * len + 0.05);
+      });
+      return;
+    }
+
+    if (voice === 'brass') {
+      // Lava — molten brass: sawtooth with a filter that opens on attack and a
+      // hard edge. Cuts through the heavy drums.
+      const o1 = c.createOscillator(), g1 = c.createGain(), f1 = c.createBiquadFilter();
+      o1.type = 'sawtooth'; o1.frequency.value = freq;
+      o1.detune.setValueAtTime(-14, now);
+      o1.detune.linearRampToValueAtTime(0, now + 0.05);     // scoop into pitch
+      f1.type = 'lowpass'; f1.Q.value = 3.5;
+      f1.frequency.setValueAtTime(freq * 1.4, now);
+      f1.frequency.linearRampToValueAtTime(freq * 5.5, now + 0.07);
+      f1.frequency.exponentialRampToValueAtTime(freq * 2.0, now + dur);
+      g1.gain.setValueAtTime(0, now);
+      g1.gain.linearRampToValueAtTime(0.052, now + 0.02);
+      g1.gain.setValueAtTime(0.042, now + dur * 0.6);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      o1.connect(f1); f1.connect(g1); out(g1); o1.start(now); o1.stop(now + dur + 0.03);
+      // Detuned second saw — thickness
+      const o2 = c.createOscillator(), g2 = c.createGain();
+      o2.type = 'sawtooth'; o2.frequency.value = freq; o2.detune.value = 9;
+      g2.gain.setValueAtTime(0, now);
+      g2.gain.linearRampToValueAtTime(0.026, now + 0.025);
+      g2.gain.exponentialRampToValueAtTime(0.0001, now + dur * 0.85);
+      o2.connect(f1); g2.connect(musicGain); o2.start(now); o2.stop(now + dur + 0.03);
+      return;
+    }
+
+    if (voice === 'choir') {
+      // The Abyss — voices in a vast space: slow swell, triangle stack, heavy
+      // vibrato late in the note. Deliberately unhurried and looming.
+      const dl = dur * 1.05;
+      [[1, 0.044, 0], [2, 0.020, 4], [2.99, 0.010, -6]].forEach(([m, amp, det]) => {
+        const o = c.createOscillator(), g = c.createGain(), f = c.createBiquadFilter();
+        o.type = m === 1 ? 'triangle' : 'sine';
+        o.frequency.value = freq * m; o.detune.value = det;
+        f.type = 'lowpass'; f.frequency.value = freq * 4.5; f.Q.value = 0.7;
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(amp, now + Math.min(0.28, dl * 0.35));  // slow swell
+        g.gain.setValueAtTime(amp * 0.85, now + dl * 0.72);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dl);
+        o.connect(f); f.connect(g); (m === 1 ? out : outDry)(g); o.start(now); o.stop(now + dl + 0.06);
+        if (m === 1) {
+          const vib = c.createOscillator(), vg = c.createGain();
+          vib.type = 'sine'; vib.frequency.value = 4.6; vg.gain.value = freq * 0.008;
+          vib.connect(vg); vg.connect(o.frequency);
+          vib.start(now + dl * 0.4); vib.stop(now + dl + 0.02);
+        }
+      });
+      return;
+    }
+
+    if (voice === 'lead') {
+      // Vibe — bright synth lead: square + saw, snappy, a touch of pitch glide.
+      const o1 = c.createOscillator(), g1 = c.createGain(), f1 = c.createBiquadFilter();
+      o1.type = 'square'; o1.frequency.setValueAtTime(freq * 0.985, now);
+      o1.frequency.linearRampToValueAtTime(freq, now + 0.035);
+      f1.type = 'lowpass'; f1.frequency.value = freq * 6; f1.Q.value = 1.8;
+      g1.gain.setValueAtTime(0, now);
+      g1.gain.linearRampToValueAtTime(0.050, now + 0.008);
+      g1.gain.setValueAtTime(0.034, now + dur * 0.5);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      o1.connect(f1); f1.connect(g1); out(g1); o1.start(now); o1.stop(now + dur + 0.03);
+      const o2 = c.createOscillator(), g2 = c.createGain();
+      o2.type = 'sawtooth'; o2.frequency.value = freq * 2; o2.detune.value = 7;
+      g2.gain.setValueAtTime(0, now);
+      g2.gain.linearRampToValueAtTime(0.016, now + 0.006);
+      g2.gain.exponentialRampToValueAtTime(0.0001, now + dur * 0.5);
+      o2.connect(g2); g2.connect(musicGain); o2.start(now); o2.stop(now + dur + 0.02);
+      return;
+    }
+
+    // 'bell' (default) — original marimba/bell patch, unchanged.
     const o1 = c.createOscillator(), g1 = c.createGain();
     o1.type = 'sine'; o1.frequency.value = freq;
     // Vibrato: starts after attack settles
@@ -4520,10 +5438,52 @@ const SND = (() => {
     o3.connect(g3); g3.connect(musicGain); o3.start(now); o3.stop(now + 0.07);
   }
 
-  // ── Celesta/music-box arpeggio — bright sparkle notes ──
-  function _playArpNote(freq) {
+  // ── Arpeggio voices — the fast sparkle layer ──
+  function _playArpNote(freq, voice) {
     if (!musicGain) return;
     const c = getCtx(), now = c.currentTime;
+
+    if (voice === 'ice') {
+      // Tiny high glints, like frost cracking — very short, very bright.
+      const o = c.createOscillator(), g = c.createGain(), f = c.createBiquadFilter();
+      o.type = 'triangle'; o.frequency.value = freq * 2;
+      f.type = 'highpass'; f.frequency.value = 1200;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.020, now + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+      o.connect(f); f.connect(g); g.connect(musicGain); o.start(now); o.stop(now + 0.09);
+      const o2 = c.createOscillator(), g2 = c.createGain();
+      o2.type = 'sine'; o2.frequency.value = freq * 4.1;
+      g2.gain.setValueAtTime(0, now);
+      g2.gain.linearRampToValueAtTime(0.007, now + 0.001);
+      g2.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
+      o2.connect(g2); g2.connect(musicGain); o2.start(now); o2.stop(now + 0.045);
+      return;
+    }
+
+    if (voice === 'digital') {
+      // Vibe — clipped square blips, arcade-flavoured.
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = 'square'; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.019, now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.065);
+      o.connect(g); g.connect(musicGain); o.start(now); o.stop(now + 0.075);
+      return;
+    }
+
+    if (voice === 'ash') {
+      // Lava — dull, smothered embers rather than bright sparkle.
+      const o = c.createOscillator(), g = c.createGain(), f = c.createBiquadFilter();
+      o.type = 'triangle'; o.frequency.value = freq;
+      f.type = 'lowpass'; f.frequency.value = 900; f.Q.value = 1.2;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.017, now + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+      o.connect(f); f.connect(g); g.connect(musicGain); o.start(now); o.stop(now + 0.15);
+      return;
+    }
+
+    // 'celesta' (default) — original music-box patch, unchanged.
     const o1 = c.createOscillator(), g1 = c.createGain();
     o1.type = 'sine'; o1.frequency.value = freq;
     g1.gain.setValueAtTime(0, now);
@@ -4539,11 +5499,91 @@ const SND = (() => {
     o2.connect(g2); g2.connect(musicGain); o2.start(now); o2.stop(now + 0.055);
   }
 
-  // ── Soft string-pad harmony — three detuned sines, slow attack ──
-  function _playHarNote(freq, durBeats, bpm) {
+  // ── Harmony-pad voices ──
+  function _playHarNote(freq, durBeats, bpm, voice) {
     if (!musicGain) return;
     const c = getCtx(), now = c.currentTime;
     const dur = (60 / bpm) * durBeats * 0.92;
+
+    if (voice === 'glacier') {
+      // Icelands — wide, slow, shimmering. Big detune spread and a high sheen
+      // partial so the pad sounds like light through ice rather than strings.
+      const filt = c.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = freq * 6; filt.Q.value = 0.4;
+      filt.connect(musicGain);
+      [-22, -7, 7, 22].forEach(cents => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sine'; o.frequency.value = freq * Math.pow(2, cents / 1200);
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(0.024, now + dur * 0.30);   // very slow swell
+        g.gain.setValueAtTime(0.020, now + dur * 0.75);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        o.connect(g); g.connect(filt); o.start(now); o.stop(now + dur + 0.08);
+      });
+      const sh = c.createOscillator(), sg = c.createGain();
+      sh.type = 'sine'; sh.frequency.value = freq * 5.02;
+      sg.gain.setValueAtTime(0, now);
+      sg.gain.linearRampToValueAtTime(0.006, now + dur * 0.4);
+      sg.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      sh.connect(sg); sg.connect(musicGain); sh.start(now); sh.stop(now + dur + 0.05);
+      return;
+    }
+
+    if (voice === 'choir') {
+      // The Abyss — massed low voices. Octave-doubled downward for weight.
+      const filt = c.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = freq * 3.0; filt.Q.value = 0.8;
+      filt.connect(musicGain);
+      [[0.5, 0.026, -5], [1, 0.030, 0], [1, 0.026, 11], [1.5, 0.012, 4]].forEach(([m, amp, det]) => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'triangle'; o.frequency.value = freq * m; o.detune.value = det;
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(amp, now + dur * 0.22);
+        g.gain.setValueAtTime(amp * 0.8, now + dur * 0.7);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        o.connect(g); g.connect(filt); o.start(now); o.stop(now + dur + 0.08);
+      });
+      return;
+    }
+
+    if (voice === 'saw') {
+      // Vibe — bright analog-style pad, wide detune, gentle filter movement.
+      const filt = c.createBiquadFilter();
+      filt.type = 'lowpass'; filt.Q.value = 1.0;
+      filt.frequency.setValueAtTime(freq * 3, now);
+      filt.frequency.linearRampToValueAtTime(freq * 7, now + dur * 0.5);
+      filt.frequency.linearRampToValueAtTime(freq * 3.5, now + dur);
+      filt.connect(musicGain);
+      [-14, 0, 14].forEach(cents => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sawtooth'; o.frequency.value = freq * Math.pow(2, cents / 1200);
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(0.020, now + 0.08);
+        g.gain.setValueAtTime(0.016, now + dur * 0.7);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        o.connect(g); g.connect(filt); o.start(now); o.stop(now + dur + 0.06);
+      });
+      return;
+    }
+
+    if (voice === 'organ') {
+      // Lava/Doom — stacked fifths and octaves, unwavering. Church-of-dread.
+      const filt = c.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = freq * 4.5; filt.Q.value = 0.6;
+      filt.connect(musicGain);
+      [[1, 0.026], [1.5, 0.015], [2, 0.017], [3, 0.008]].forEach(([m, amp]) => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sawtooth'; o.frequency.value = freq * m;
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(amp, now + 0.04);
+        g.gain.setValueAtTime(amp * 0.9, now + dur * 0.8);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        o.connect(g); g.connect(filt); o.start(now); o.stop(now + dur + 0.05);
+      });
+      return;
+    }
+
+    // 'strings' (default) — original pad, unchanged.
     const filt = c.createBiquadFilter();
     filt.type = 'lowpass'; filt.frequency.value = freq * 3.5; filt.Q.value = 0.5;
     filt.connect(musicGain);
@@ -4559,11 +5599,66 @@ const SND = (() => {
     });
   }
 
-  // ── Warm round bass — sine body + low-passed sawtooth for punch ──
-  function _playBassNote(freq, durBeats, bpm) {
+  // ── Bass voices ──
+  function _playBassNote(freq, durBeats, bpm, voice) {
     if (!musicGain) return;
     const c = getCtx(), now = c.currentTime;
     const dur = (60 / bpm) * durBeats * 0.80;
+
+    if (voice === 'sub') {
+      // The Abyss — almost pure sub. Felt more than heard.
+      const o1 = c.createOscillator(), g1 = c.createGain();
+      o1.type = 'sine'; o1.frequency.value = freq;
+      g1.gain.setValueAtTime(0, now);
+      g1.gain.linearRampToValueAtTime(0.090, now + 0.05);
+      g1.gain.setValueAtTime(0.070, now + dur * 0.6);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + dur * 1.05);
+      o1.connect(g1); g1.connect(musicGain); o1.start(now); o1.stop(now + dur * 1.1);
+      const o2 = c.createOscillator(), g2 = c.createGain(), f2 = c.createBiquadFilter();
+      o2.type = 'triangle'; o2.frequency.value = freq * 2;
+      f2.type = 'lowpass'; f2.frequency.value = freq * 4;
+      g2.gain.setValueAtTime(0, now);
+      g2.gain.linearRampToValueAtTime(0.014, now + 0.08);
+      g2.gain.exponentialRampToValueAtTime(0.0001, now + dur * 0.8);
+      o2.connect(f2); f2.connect(g2); g2.connect(musicGain); o2.start(now); o2.stop(now + dur + 0.05);
+      return;
+    }
+
+    if (voice === 'growl') {
+      // Lava/Doom — resonant filtered saw with a downward sweep. Menacing.
+      const o1 = c.createOscillator(), g1 = c.createGain(), f1 = c.createBiquadFilter();
+      o1.type = 'sawtooth'; o1.frequency.value = freq;
+      f1.type = 'lowpass'; f1.Q.value = 6;
+      f1.frequency.setValueAtTime(freq * 7, now);
+      f1.frequency.exponentialRampToValueAtTime(freq * 1.8, now + dur * 0.7);
+      g1.gain.setValueAtTime(0, now);
+      g1.gain.linearRampToValueAtTime(0.062, now + 0.01);
+      g1.gain.setValueAtTime(0.048, now + dur * 0.5);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      o1.connect(f1); f1.connect(g1); g1.connect(musicGain); o1.start(now); o1.stop(now + dur + 0.02);
+      const o2 = c.createOscillator(), g2 = c.createGain();
+      o2.type = 'sine'; o2.frequency.value = freq * 0.5;   // sub octave for weight
+      g2.gain.setValueAtTime(0, now);
+      g2.gain.linearRampToValueAtTime(0.048, now + 0.015);
+      g2.gain.exponentialRampToValueAtTime(0.0001, now + dur * 0.9);
+      o2.connect(g2); g2.connect(musicGain); o2.start(now); o2.stop(now + dur + 0.02);
+      return;
+    }
+
+    if (voice === 'pluck') {
+      // Vibe — short punchy synth bass, tight decay.
+      const o1 = c.createOscillator(), g1 = c.createGain(), f1 = c.createBiquadFilter();
+      o1.type = 'sawtooth'; o1.frequency.value = freq;
+      f1.type = 'lowpass'; f1.Q.value = 4;
+      f1.frequency.setValueAtTime(freq * 9, now);
+      f1.frequency.exponentialRampToValueAtTime(freq * 2, now + 0.14);
+      g1.gain.setValueAtTime(0.072, now);
+      g1.gain.exponentialRampToValueAtTime(0.0001, now + Math.min(dur, 0.42));
+      o1.connect(f1); f1.connect(g1); g1.connect(musicGain); o1.start(now); o1.stop(now + dur + 0.02);
+      return;
+    }
+
+    // 'round' (default) — original warm bass, unchanged.
     // Sine body
     const o1 = c.createOscillator(), g1 = c.createGain();
     o1.type = 'sine'; o1.frequency.value = freq;
@@ -4598,7 +5693,7 @@ const SND = (() => {
     const [note, beats] = phrase[_chipMelStep % phrase.length];
     const beatMs = 60000 / song.bpm;
     const freq = _NOTE[note];           // 'rest' (and any undefined note) → silent beat
-    if (freq) _playMelNote(freq, beats, song.bpm);
+    if (freq) _playMelNote(freq, beats, song.bpm, song.voice?.mel);
     _chipMelStep++;
     // When the current phrase finishes, advance to the next section in the form.
     if (_chipMelStep >= phrase.length) { _chipMelStep = 0; _chipMelSection = (_chipMelSection + 1) % 1024; }
@@ -4611,7 +5706,7 @@ const SND = (() => {
     const [note, beats] = song.bas[_chipBassStep % song.bas.length];
     const beatMs = 60000 / song.bpm;
     const freq = _NOTE[note];
-    if (freq) _playBassNote(freq, beats, song.bpm);
+    if (freq) _playBassNote(freq, beats, song.bpm, song.voice?.bass);
     _chipBassStep = (_chipBassStep + 1) % song.bas.length;
     _chipBassTimer = setTimeout(_chipBassTick, (beatMs * beats - 5) * _tempoMult * _diffTempo);
   }
@@ -4622,7 +5717,7 @@ const SND = (() => {
     const [note, beats] = song.har[_chipHarStep % song.har.length];
     const beatMs = 60000 / song.bpm;
     const freq = _NOTE[note];
-    if (freq) _playHarNote(freq, beats, song.bpm);
+    if (freq) _playHarNote(freq, beats, song.bpm, song.voice?.pad);
     _chipHarStep = (_chipHarStep + 1) % song.har.length;
     _chipHarTimer = setTimeout(_chipHarTick, (beatMs * beats - 5) * _tempoMult * _diffTempo);
   }
@@ -4633,7 +5728,7 @@ const SND = (() => {
     const [note, beats] = song.arp[_chipArpStep % song.arp.length];
     const beatMs = 60000 / song.bpm;
     const freq = _NOTE[note];
-    if (freq) _playArpNote(freq);
+    if (freq) _playArpNote(freq, song.voice?.arp);
     _chipArpStep = (_chipArpStep + 1) % song.arp.length;
     _chipArpTimer = setTimeout(_chipArpTick, (beatMs * beats - 5) * _tempoMult * _diffTempo);
   }
@@ -4677,53 +5772,70 @@ const SND = (() => {
   }
   function _stopHeartbeat() { clearTimeout(_heartbeatTimer); _heartbeatTimer = null; }
 
+  // Shared noise-burst helper for the drum kits.
+  function _noiseHit(c, dur, vol, filtType, filtFreq, Q) {
+    const bufLen = Math.ceil(c.sampleRate * dur);
+    const buf = c.createBuffer(1, bufLen, c.sampleRate);
+    const bd = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) bd[i] = Math.random() * 2 - 1;
+    const src = c.createBufferSource(); src.buffer = buf;
+    const filt = c.createBiquadFilter();
+    filt.type = filtType; filt.frequency.value = filtFreq; if (Q != null) filt.Q.value = Q;
+    const g = c.createGain();
+    g.gain.setValueAtTime(vol, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+    src.connect(filt); filt.connect(g); g.connect(musicGain);
+    src.start(); src.stop(c.currentTime + dur + 0.02);
+  }
+  function _kickHit(c, topHz, botHz, vol, len) {
+    const o = c.createOscillator(), g = c.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(topHz, c.currentTime);
+    o.frequency.exponentialRampToValueAtTime(botHz, c.currentTime + len * 0.8);
+    g.gain.setValueAtTime(vol, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + len);
+    o.connect(g); g.connect(musicGain); o.start(); o.stop(c.currentTime + len + 0.03);
+  }
+
   function _chipPercTick() {
     if (!_musicPlaying || !_chipSong || !musicGain) return;
     const song = _CHIP_SONGS[_chipSong]; if (!song) return;
     const beatMs = 60000 / song.bpm;
     const c = getCtx();
     const beat4 = _chipPercBeat % 4;
-    // Kick on beat 0
-    if (beat4 === 0) {
-      const o = c.createOscillator(), g = c.createGain();
-      o.type = 'sine';
-      o.frequency.setValueAtTime(120, c.currentTime);
-      o.frequency.exponentialRampToValueAtTime(30, c.currentTime + 0.12);
-      g.gain.setValueAtTime(0.22, c.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + 0.15);
-      o.connect(g); g.connect(musicGain); o.start(); o.stop(c.currentTime + 0.18);
+    const kit = song.voice?.kit || 'standard';
+
+    if (kit === 'taiko') {
+      // The Abyss — huge sparse drums, no hats. Space between hits does the work.
+      if (beat4 === 0) { _kickHit(c, 105, 24, 0.30, 0.34); _noiseHit(c, 0.14, 0.045, 'lowpass', 320); }
+      if (beat4 === 2) { _kickHit(c, 78, 22, 0.20, 0.28); }
+      if (_chipPercBeat % 8 === 7) _noiseHit(c, 0.30, 0.035, 'lowpass', 480);   // distant roll
+    } else if (kit === 'ice') {
+      // Icelands — brittle, glassy percussion. Soft kick, crystalline tick.
+      if (beat4 === 0) _kickHit(c, 96, 32, 0.13, 0.16);
+      if (beat4 === 2) _noiseHit(c, 0.07, 0.055, 'highpass', 5200);
+      if (_chipPercBeat % 2 === 0) _noiseHit(c, 0.018, 0.030, 'highpass', 9500);
+    } else if (kit === 'industrial') {
+      // Doom — metallic, relentless, every beat hits.
+      _kickHit(c, 140, 28, 0.24, 0.17);
+      if (beat4 === 2) { _noiseHit(c, 0.12, 0.15, 'bandpass', 2400, 0.6); _noiseHit(c, 0.06, 0.07, 'highpass', 6000); }
+      _noiseHit(c, 0.03, beat4 % 2 ? 0.070 : 0.040, 'highpass', 8200);
+      if (_chipPercBeat % 8 === 6) _noiseHit(c, 0.22, 0.055, 'bandpass', 3400, 1.4);  // clang
+    } else if (kit === 'electro') {
+      // Vibe — tight electronic kit with an offbeat clap.
+      if (beat4 === 0 || beat4 === 2) _kickHit(c, 150, 40, 0.24, 0.13);
+      if (beat4 === 2) _noiseHit(c, 0.05, 0.11, 'bandpass', 1600, 1.1);
+      _noiseHit(c, 0.02, beat4 % 2 ? 0.075 : 0.038, 'highpass', 8800);
+    } else {
+      // 'standard' (default) — original kit, unchanged.
+      if (beat4 === 0) _kickHit(c, 120, 30, 0.22, 0.15);
+      if (beat4 === 2) _noiseHit(c, 0.09, 0.13, 'bandpass', 1800, 0.8);
+      _noiseHit(c, 0.025, (beat4 === 0 || beat4 === 2) ? 0.045 : 0.065, 'highpass', 7000);
     }
-    // Snare on beat 2
-    if (beat4 === 2) {
-      const bufLen = Math.ceil(c.sampleRate * 0.09);
-      const buf = c.createBuffer(1, bufLen, c.sampleRate);
-      const bd = buf.getChannelData(0);
-      for (let i = 0; i < bufLen; i++) bd[i] = Math.random() * 2 - 1;
-      const src = c.createBufferSource(); src.buffer = buf;
-      const filt = c.createBiquadFilter(); filt.type = 'bandpass'; filt.frequency.value = 1800; filt.Q.value = 0.8;
-      const g = c.createGain();
-      g.gain.setValueAtTime(0.13, c.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + 0.09);
-      src.connect(filt); filt.connect(g); g.connect(musicGain);
-      src.start(); src.stop(c.currentTime + 0.11);
-    }
-    // Hi-hat on every beat
-    {
-      const bufLen = Math.ceil(c.sampleRate * 0.025);
-      const buf = c.createBuffer(1, bufLen, c.sampleRate);
-      const bd = buf.getChannelData(0);
-      for (let i = 0; i < bufLen; i++) bd[i] = Math.random() * 2 - 1;
-      const src = c.createBufferSource(); src.buffer = buf;
-      const filt = c.createBiquadFilter(); filt.type = 'highpass'; filt.frequency.value = 7000;
-      const g = c.createGain();
-      const hhVol = beat4 === 0 || beat4 === 2 ? 0.045 : 0.065; // louder on off-beats
-      g.gain.setValueAtTime(hhVol, c.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + 0.025);
-      src.connect(filt); filt.connect(g); g.connect(musicGain);
-      src.start(); src.stop(c.currentTime + 0.03);
-    }
-    // Sparkle ping every 8 beats — a bright ascending bell that kids love
-    if (_chipPercBeat % 8 === 4) {
+
+    // Sparkle ping every 8 beats — a bright ascending bell that kids love.
+    // Songs can opt out (sparkle:false) when it would undercut the mood.
+    if (song.voice?.sparkle !== false && _chipPercBeat % 8 === 4) {
       [0, 60, 120].forEach((ms, i) => {
         setTimeout(() => {
           const song = _CHIP_SONGS[_chipSong];
@@ -4738,7 +5850,10 @@ const SND = (() => {
       });
     }
     _chipPercBeat++;
-    _chipPercTimer = setTimeout(_chipPercTick, beatMs - 5);
+    // Must scale by the same tempo factors as mel/bass/har/arp. Without this the
+    // drums held the base tempo while everything else accelerated with intensity,
+    // so the kit drifted out of time exactly when the fight peaked.
+    _chipPercTimer = setTimeout(_chipPercTick, (beatMs - 5) * _tempoMult * _diffTempo);
   }
 
   function _startMusicEngine() {
@@ -4786,7 +5901,18 @@ const SND = (() => {
     enemyDie()    { osc( 185,'sawtooth',0.23,0.16,  52); noise(0.14, 0.07, 580); },
     bigEnemyDie() { osc(  80,'sawtooth',0.45,0.28,  28); noise(0.30, 0.18, 260); osc(140,'sine',0.35,0.12,40); },
     defenderDie() { osc(  95,'sine',   0.38,0.25,  30); noise(0.22, 0.14, 420); osc(200,'sawtooth',0.18,0.08,60); },
-    enemyHit()    { noise(0.045,0.10,1600,'bandpass'); },
+    // Throttled at 40 ms. Called once per enemy damaged, so a catapult splash or an
+    // exploder hitting 8 orcs fired 8 identical noise bursts in the SAME frame —
+    // they sum into one loud crack and can clip. Its neighbours were already
+    // throttled (SND.hit at 130 ms, hurtEnemy per-enemy at 350 ms); this one wasn't.
+    // 40 ms is deliberately short: it still passes ~25 hits/sec so rapid single-target
+    // fire keeps its per-shot feedback, and only collapses same-frame stacking.
+    enemyHit()    {
+      const now = Date.now();
+      if (now - _lastEnemyHitMs < 40) return;
+      _lastEnemyHitMs = now;
+      noise(0.045,0.10,1600,'bandpass');
+    },
     castleHit()   { osc(  52,'sine',   0.55, 0.48,  20); noise(0.42, 0.32, 195); },
     enemyArrow()  { osc( 480,'sawtooth',0.07,0.05, 140); },
     enemyRock()   { osc(  70,'sine',   0.22, 0.18,  30); noise(0.15, 0.1,  270); },
@@ -4820,6 +5946,7 @@ const SND = (() => {
         case 'spider':     noise(0.09,0.11,4000,'highpass'); osc(630,'square',0.08,0.09,112); noise(0.06,0.06,2100); break;
         case 'cyclops':    osc(52,'sawtooth',0.58,0.33,16); noise(0.48,0.30,190); osc(85,'sine',0.42,0.15,26); setTimeout(()=>noise(0.28,0.18,145,'lowpass'),175); break;
         case 'troll':      osc(65,'sawtooth',0.55,0.30,20); noise(0.40,0.22,205); setTimeout(()=>{ osc(48,'sine',0.28,0.17,14); noise(0.20,0.12,140,'lowpass'); },195); break;
+        case 'rockTroll':  osc(46,'sawtooth',0.62,0.34,14); noise(0.52,0.30,165,'lowpass'); setTimeout(()=>{ noise(0.30,0.20,110,'lowpass'); osc(38,'sine',0.26,0.16,12); },210); setTimeout(()=>noise(0.18,0.10,95,'lowpass'),400); break; // stone colossus crumbling in stages
         case 'boss':       osc(78,'sawtooth',0.52,0.32,24); noise(0.40,0.24,235); osc(128,'sine',0.40,0.15,34); break;
         case 'brute':      osc(108,'sawtooth',0.38,0.23,36); noise(0.22,0.12,390); break;
         case 'exploder':   osc(52,'sine',0.52,0.48,13); noise(0.44,0.38,162,'lowpass'); osc(76,'sawtooth',0.32,0.22,21); break;
@@ -4902,6 +6029,13 @@ const SND = (() => {
     },
     // ── New sounds ───────────────────────────────────────────────────────
     btnClick()    { osc(1080,'square',0.032,0.038,660); },
+    // Rally was the only world-click command in the game with no audio at all — every
+    // other one (build, sell, upgrade, deny) speaks. Three cues so the three states are
+    // distinguishable without looking: arming, committing, standing down.
+    rallyArm()    { osc(520,'square',0.05,0.05,780); setTimeout(() => osc(780,'square',0.045,0.05,1040), 55); },
+    rallySet()    { osc(392,'sawtooth',0.09,0.11,392); setTimeout(() => osc(587,'sawtooth',0.10,0.16,587), 90);
+                    setTimeout(() => noise(0.05,0.05,2200,'highpass'), 90); },
+    rallyClear()  { osc(587,'square',0.05,0.06,440); setTimeout(() => osc(392,'square',0.05,0.08,294), 70); },
     // Soft dual-tone descending buzz for rejected actions (can't afford, blocked tile, etc.)
     denyClick()   { osc(220,'square',0.08,0.06,140); setTimeout(() => osc(150,'square',0.06,0.05,90), 50); },
     // Vocalization when an enemy lands a hit — throttled so overlapping attackers don't blast
@@ -5238,7 +6372,11 @@ function updateOrcs(dt, t) {
       } else {
         o.group.rotation.z = o.deathDir * Math.PI / 2;
         const f = (o.deathTimer - FALL) / (TOTAL - FALL);
-        o.group.position.y = -f * 0.9 * o.scale;
+        // One-shot dust kick at ground contact — flagged so it can't double-fire
+        if (!o._impactFx) { o._impactFx = true; spawnHitParticles(o.group.position, 0x9b8a6b, 5); }
+        // Small settle bounce right after impact (heavy thud), then the body sinks away
+        const bnc = f < 0.4 ? Math.sin((f / 0.4) * Math.PI) * 0.10 * o.scale : 0;
+        o.group.position.y = bnc - f * 0.9 * o.scale;
       }
       if (o.deathTimer >= TOTAL) {
         disposeGroup(o.group); scene.remove(o.group); orcs.splice(i, 1);
@@ -5286,6 +6424,13 @@ function updateOrcs(dt, t) {
       const legBase = o.type === 'wolf' ? 0.16 : o.type === 'cyclops' ? 0.32 : 0.19;
       if (o.legL) o.legL.position.y = legBase + Math.sin(o.animTime) * 0.11;
       if (o.legR) o.legR.position.y = legBase - Math.sin(o.animTime) * 0.11;
+      // Spider at the gate: 8 legs paw in place instead of freezing mid-skitter
+      if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) {
+        const sl = o.spiderLegs[li];
+        const lp = Math.sin(o.animTime + sl.userData.ph * Math.PI);
+        sl.rotation.z = sl.userData.rz + lp * 0.12;
+        sl.position.y = 0.14 + Math.max(0, lp) * 0.04;
+      }
       // Type-specific weapon arm — same formulas as wall/defender attack
       if (o.type === 'cyclops') {
         if ((o.swingPhase || 0) > 0) {
@@ -5309,6 +6454,8 @@ function updateOrcs(dt, t) {
           o._swingRest = (o._swingRest || 0) + dt;
           if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
           if (o.armR) { o.armR.rotation.x = -0.75; o.armR.rotation.z = 0; }
+          // Exploder: settle the panic head-shake so it doesn't freeze mid-tilt outside the walk state
+          if (o.type === 'exploder') { const _eh = o.hitFlashMeshes?.[1]; if (_eh) { _eh.rotation.z = 0; _eh.rotation.x = 0; } }
           if (o.armL) o.armL.rotation.x = -Math.sin(o.animTime) * 0.88;
         }
       } else if (o.type === 'skeleton') {
@@ -5378,6 +6525,11 @@ function updateOrcs(dt, t) {
           if (o.legR)  o.legR.rotation.x  = 0;
           if (o.legFR) o.legFR.rotation.x = 0;
           if (o.legBL) o.legBL.rotation.x = 0;
+          // Tail/ears settle to rest — no wag residue from the gallop
+          if (o.tailBase) o.tailBase.rotation.y = 0;
+          if (o.tailTip)  o.tailTip.rotation.y  = 0;
+          if (o.earL) o.earL.rotation.z = -0.2;
+          if (o.earR) o.earR.rotation.z = -0.2;
         }
       } else {
         const _isRangedCaster = o.type === 'enemyArcher' || o.type === 'orcMage';
@@ -5484,6 +6636,8 @@ function updateOrcs(dt, t) {
             o._swingRest = (o._swingRest || 0) + dt;
             if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
             if (o.armR) { o.armR.rotation.x = -0.75; o.armR.rotation.z = 0; }
+          // Exploder: settle the panic head-shake so it doesn't freeze mid-tilt outside the walk state
+          if (o.type === 'exploder') { const _eh = o.hitFlashMeshes?.[1]; if (_eh) { _eh.rotation.z = 0; _eh.rotation.x = 0; } }
             if (o.armL) o.armL.rotation.x = -cwa * 1.1;
             o.group.rotation.z = Math.sin(o.animTime * 0.8) * 0.04;   // softer idle sway
             o.group.rotation.x = 0.10;                                // hold ready stance
@@ -5515,6 +6669,8 @@ function updateOrcs(dt, t) {
               if (o.armR) { o.armR.rotation.x = -1.10 - bs * 0.55; o.armR.rotation.z = -0.22 - bs * 0.24; }
               if (o.legL) o.legL.rotation.x =  bs * 0.30;
               if (o.legR) o.legR.rotation.x = -bs * 0.30;
+              // Legs splay wide as it rears — follows the bite bell so it self-resets
+              if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) { const sl = o.spiderLegs[li]; sl.rotation.z = sl.userData.rz + bs * 0.12; sl.position.y = 0.14; }
             }
             // Lunge forward into the wall during the strike
             if (!o._lungeBase && o.blockedByWall) {
@@ -5548,12 +6704,19 @@ function updateOrcs(dt, t) {
               if (o.legBL) o.legBL.rotation.x = 0;
               const _wHeadR = o.hitFlashMeshes?.[1];
               if (_wHeadR) { _wHeadR.rotation.x = 0.05; _wHeadR.position.z = 0.28; }
+              // Tail/ears settle — no residual wag leaking into the bite loop
+              if (o.tailBase) o.tailBase.rotation.y = 0;
+              if (o.tailTip)  o.tailTip.rotation.y  = 0;
+              if (o.earL) o.earL.rotation.z = -0.2;
+              if (o.earR) o.earR.rotation.z = -0.2;
             } else {
               // spider — return arms/legs to neutral idle
               if (o.armL) { o.armL.rotation.x = -1.10; o.armL.rotation.z =  0.22; }
               if (o.armR) { o.armR.rotation.x = -1.10; o.armR.rotation.z = -0.22; }
               if (o.legL) o.legL.rotation.x = 0;
               if (o.legR) o.legR.rotation.x = 0;
+              // 8 skitter legs brace at rest — no frozen mid-step pose
+              if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) { const sl = o.spiderLegs[li]; sl.rotation.z = sl.userData.rz; sl.position.y = 0.14; }
             }
             o._lungeBase = null;
             o._swingRest = (o._swingRest || 0) + dt;
@@ -5846,7 +7009,11 @@ function updateOrcs(dt, t) {
           updateOrcHPBar(o); updateOrcFlash(o, dt);
           continue;
         }
-        // Acquire (or re-verify) slot — auto-expands to outer rings, always succeeds
+        // Re-verify the slot. NOT "always succeeds" as this once claimed — it returns
+        // -1 when the defender is at maxSlots. An orc that already holds a slot gets
+        // its existing index straight back (indexOf hit), so in practice this only
+        // fails if its slot was released elsewhere and the defender has since filled
+        // up; attackSlotDist/Pos clamp negatives so the geometry stays sane either way.
         if (o.attackSlot < 0) o.attackSlot = acquireAttackSlot(o.fightingDefender, o);
         const SLOT_DIST = attackSlotDist(o.attackSlot, o.scale);
         // Navigate to assigned slot position
@@ -5903,6 +7070,13 @@ function updateOrcs(dt, t) {
             o.group.position.y = Math.abs(sa) * 0.05 + 0.02;
             o.group.rotation.z = sa * 0.10;                  // gentler scuttle roll
             o.group.rotation.x = -0.14 + Math.sin(o.animTime * 1.6) * 0.10;
+            // Legs paw rapidly in place — braced wide, quick shallow steps
+            if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) {
+              const sl = o.spiderLegs[li];
+              const lp = Math.sin(o.animTime * 2 + sl.userData.ph * Math.PI);
+              sl.rotation.z = sl.userData.rz + lp * 0.10;
+              sl.position.y = 0.14 + Math.max(0, lp) * 0.03;
+            }
             if ((o.swingPhase || 0) > 0) {
               o.swingPhase = Math.max(0, o.swingPhase - dt * 12);
               const ss = Math.sin(o.swingPhase * Math.PI);
@@ -5984,6 +7158,8 @@ function updateOrcs(dt, t) {
               o._swingRest = (o._swingRest || 0) + dt;
               if (o._swingRest >= 0.06) { o._swingRest = 0; o.swingPhase = 1.0; o.swingHit = false; o.swingDamageReady = false; }
               if (o.armR) { o.armR.rotation.x = -0.75; o.armR.rotation.z = 0; }
+          // Exploder: settle the panic head-shake so it doesn't freeze mid-tilt outside the walk state
+          if (o.type === 'exploder') { const _eh = o.hitFlashMeshes?.[1]; if (_eh) { _eh.rotation.z = 0; _eh.rotation.x = 0; } }
               if (o.armL) { o.armL.rotation.x = -cca * 0.88; o.armL.rotation.z = 0.14; }
               o.group.rotation.z = Math.sin(o.animTime * 0.6) * 0.04;   // softer idle sway
               o.group.rotation.x = 0.08;
@@ -6256,6 +7432,22 @@ function updateOrcs(dt, t) {
           if (o.legR) { o.legR.position.y = legBase - chs * 0.16; o.legR.rotation.x = -chs * 0.58; }
           if (o.armL) { o.armL.rotation.x =  chs * 0.72; o.armL.rotation.z =  chc * 0.10; }
           if (o.armR) { o.armR.rotation.x = -chs * 0.72; o.armR.rotation.z = -chc * 0.10; }
+          // Wolf charge: tail streams flat, ears pin back — no wag residue mid-sprint
+          if (o.tailBase) o.tailBase.rotation.y = 0;
+          if (o.tailTip)  o.tailTip.rotation.y  = 0;
+          if (o.earL) o.earL.rotation.z = -0.32;
+          if (o.earR) o.earR.rotation.z = -0.32;
+          // Spider charge: legs sprint-skitter instead of freezing
+          if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) {
+            const sl = o.spiderLegs[li];
+            const lp = Math.sin(o.animTime + sl.userData.ph * Math.PI);
+            sl.rotation.z = sl.userData.rz + lp * 0.20;
+            sl.position.y = 0.14 + Math.max(0, lp) * 0.05;
+          }
+          // Skeleton jaw keeps chattering in the sprint
+          const _cJaw = o.type === 'skeleton' ? o.group.userData.skelJaw : null;
+          if (_cJaw) _cJaw.rotation.x = 0.12 + Math.abs(stepAnim(Math.sin(o.animTime * 3), 3)) * 0.16;
+          _restHeadPose(o);   // undo any bite lunge left over from an interrupted attack
         }
       }
       updateOrcHPBar(o);
@@ -6478,6 +7670,13 @@ function updateOrcs(dt, t) {
       if (o.legR) { o.legR.rotation.x = -sp1 * 0.50; o.legR.rotation.z = -sp2 * 0.22; }
       if (o.armL) { o.armL.rotation.x = -sp2 * 0.38; o.armL.rotation.z =  sp1 * 0.18; }
       if (o.armR) { o.armR.rotation.x =  sp2 * 0.38; o.armR.rotation.z = -sp1 * 0.18; }
+      // Alternating-tetrapod skitter — two leg groups hop anti-phase, quantised for flipbook chunk
+      if (o.spiderLegs) for (let li = 0; li < o.spiderLegs.length; li++) {
+        const sl = o.spiderLegs[li];
+        const lp = stepAnim(Math.sin(o.animTime + sl.userData.ph * Math.PI), 3);
+        sl.rotation.z = sl.userData.rz + lp * 0.20;      // leg sweeps around rest tilt
+        sl.position.y = 0.14 + Math.max(0, lp) * 0.05;   // lifts on the up-beat
+      }
     } else if (o.type === 'wolf') {
       o.animTime += dt * 10;
       const wBound = Math.abs(Math.sin(o.animTime * 1.5));
@@ -6502,6 +7701,14 @@ function updateOrcs(dt, t) {
       // Head nods with each gallop bound
       const _wHead = o.hitFlashMeshes?.[1];
       if (_wHead) _wHead.rotation.x = wSpine * 0.13;
+      // Tail wags with the gallop — darker tip whips a beat behind the base ("happy hunter")
+      if (o.tailBase) o.tailBase.rotation.y = Math.sin(o.animTime * 0.75) * 0.30;
+      if (o.tailTip)  o.tailTip.rotation.y  = Math.sin(o.animTime * 0.75 - 0.8) * 0.45;
+      // Ear flicks — rare sharp twitches, each ear on its own off-beat rhythm
+      const _efL = Math.pow(Math.max(0, Math.sin(o.animTime * 0.37)), 8);
+      const _efR = Math.pow(Math.max(0, Math.sin(o.animTime * 0.31 + 2.1)), 8);
+      if (o.earL) o.earL.rotation.z = -0.2 - _efL * 0.18;
+      if (o.earR) o.earR.rotation.z = -0.2 - _efR * 0.18;
     } else if (o.type === 'cyclops') {
       o.animTime += dt * 2.0;
       const cs     = Math.sin(o.animTime);
@@ -6625,7 +7832,15 @@ function updateOrcs(dt, t) {
           (o.type === 'cyclops' || o.type === 'rockTroll' || o.type === 'troll' || o.type === 'boss' || o.type === 'brute')) {
         const _gaitPhase = Math.floor(o.animTime / Math.PI);
         if (o._gaitPhase === undefined) o._gaitPhase = _gaitPhase;
-        else if (_gaitPhase > o._gaitPhase) { o._gaitPhase = _gaitPhase; SND.footstep?.(o.type); }
+        else if (_gaitPhase > o._gaitPhase) {
+          o._gaitPhase = _gaitPhase; SND.footstep?.(o.type);
+          // Tiny ground puff under the planted foot — vfx budget guard keeps herds from spamming
+          if (vfx.length < 110) {
+            const _foot = (_gaitPhase % 2 === 0) ? o.legR : o.legL; // gs>0 after even crossing → right foot planted
+            _foot.getWorldPosition(_tmpV3a); _tmpV3a.y = 0.06;
+            spawnHitParticles(_tmpV3a, 0x9a8a6a, 3);
+          }
+        }
       }
       o.group.position.y = gs * gs * _bodyBob;
       // Velocity-proportional forward lean + hit-backward lean
@@ -6654,13 +7869,28 @@ function updateOrcs(dt, t) {
           o.armR.rotation.x = 0.40 + gs * 0.25; o.armR.rotation.z = -0.15 - gc * 0.08; // natural carry
         }
       }
+      // HealerOrc: staff-raise flourish when the heal pulse fires — sweeps up, springs back to carry
+      if (o.type === 'healerOrc' && (o.staffFlourish || 0) > 0) {
+        o.staffFlourish = Math.max(0, o.staffFlourish - dt * 2.4);
+        const hf = Math.sin(o.staffFlourish * Math.PI); // bell: raise → peak → settle
+        if (o.armR) { o.armR.rotation.x -= hf * 1.8; o.armR.rotation.z -= hf * 0.22; } // staff thrust skyward
+        if (o.armL) o.armL.rotation.x -= hf * 0.35;   // off-hand lifts in sympathy
+        o.group.position.y += hf * 0.05;              // slight rise onto toes
+      }
       // Subtle head bob: chin dips each footfall, slightly counters hip rock
       const _defHead = o.hitFlashMeshes?.[1];
+      _restHeadPose(o);   // undo any bite lunge left over from an interrupted attack
       if (_defHead) {
         if (o.type === 'skeleton') {
           // Loose-neck wobble — undead skull rolls opposite to hips and tilts on each footfall
           _defHead.rotation.z = -gc * 0.15;
           _defHead.rotation.x = Math.abs(gs) * 0.13 - 0.03;
+          // Jaw chatters with each step — quantised for a bony flipbook clack
+          const _sJaw = o.group.userData.skelJaw;
+          if (_sJaw) _sJaw.rotation.x = 0.12 + Math.abs(stepAnim(Math.sin(o.animTime * 3), 3)) * 0.16;
+          // Bones rattle loose — off-beat wobble layered on the arm swing
+          if (o.armL) { o.armL.rotation.x -= Math.sin(o.animTime * 2.7) * 0.09; o.armL.rotation.z += Math.sin(o.animTime * 3.1) * 0.08; }
+          if (o.armR) { o.armR.rotation.x += Math.cos(o.animTime * 2.7) * 0.09; o.armR.rotation.z -= Math.sin(o.animTime * 3.1 + 1.3) * 0.08; }
         } else {
           _defHead.rotation.x = -Math.abs(gs) * 0.07;     // chin tuck at each step
           _defHead.rotation.z = -gc * (_hipRock * 0.45);  // counters hip rock
@@ -6680,6 +7910,16 @@ function updateOrcs(dt, t) {
         if (o.fuseEmber) o.fuseEmber.scale.setScalar(1 + Math.abs(pulse) * (0.5 + panicProg * 0.6));
         // Twitchy body jitter near the end
         o.group.position.x += (Math.random() - 0.5) * 0.006 * panicProg;
+        // Anxiety accumulator — dt-driven (freezes on pause), ticks faster as detonation nears
+        o.panicT = (o.panicT || 0) + dt * (6 + panicProg * 8);
+        // Head shakes "no-no" — small at spawn, frantic near the gate
+        const _exHead = o.hitFlashMeshes?.[1];
+        if (_exHead) {
+          _exHead.rotation.z = Math.sin(o.panicT * 1.7) * (0.03 + panicProg * 0.06);
+          _exHead.rotation.x = -Math.abs(gs) * 0.07 + Math.sin(o.panicT * 2.3) * 0.03 * panicProg;
+        }
+        // Whole-body tremble layered on the hip rock — barely-contained blast
+        o.group.rotation.z += Math.sin(o.panicT * 4.1) * 0.02 * panicProg;
       }
     }
 
@@ -6736,7 +7976,7 @@ function updateOrcs(dt, t) {
             healed = true;
           }
         }
-        if (healed) { spawnImpactRing(o.group.position.clone(), 0x44ff44); SND.heal(); }
+        if (healed) { spawnImpactRing(o.group.position.clone(), 0x44ff44); SND.heal(); o.staffFlourish = 1.0; } // staff-raise flourish on a landed pulse
       }
     }
 
@@ -6749,6 +7989,20 @@ function updateOrcs(dt, t) {
   if (hpPct > 0.5)       { castleGlow.color.set(0x00d4ff); castleGlow.intensity = 2.5; }
   else if (hpPct > 0.25) { castleGlow.color.set(0xff8800); castleGlow.intensity = 2.8; }
   else                   { castleGlow.color.set(0xff2200); castleGlow.intensity = 3.5; }
+}
+
+// Restore the head to its resting offset for types whose ATTACK animation moves the
+// head's *position* (skeleton bite lunge, wolf bite). The walk/chase states re-drive
+// head rotation every frame, but never head position — and each attack state resets
+// the lunge only in its own rest branch. So an enemy that leaves an attack mid-swing
+// (its wall gets destroyed, or the defender it was biting dies) skips that reset and
+// walks away with its head stuck forward for the rest of its life.
+function _restHeadPose(o) {
+  if (o.type !== 'skeleton' && o.type !== 'wolf') return;
+  const hd = o.hitFlashMeshes?.[1];
+  if (!hd) return;
+  if (o.type === 'skeleton') { hd.position.z = 0;    hd.position.y = 1.07; }
+  else                       { hd.position.z = 0.28; }
 }
 
 function updateOrcHPBar(o) {
@@ -6937,6 +8191,18 @@ function buildWall(col, row) {
   // Iron ring decoration on front face
   const ring = mesh(box(0.14, 0.14, 0.06), M.catMetal); ring.position.set(0, 0.62, 0.47); g.add(ring);
   const crossH = mesh(box(0.14, 0.03, 0.06), M.catMetal); crossH.position.set(0, 0.62, 0.47); g.add(crossH);
+  // Drainage spout — stone gutter jutting from the left face below the cap (balances torch on right)
+  const spout = mesh(box(0.18, 0.09, 0.12), M.castleStone); spout.position.set(-0.52, 1.90, 0.16); g.add(spout);
+  const spoutMouth = mesh(box(0.06, 0.05, 0.06), M.castleDark); spoutMouth.position.set(-0.60, 1.89, 0.16); g.add(spoutMouth);
+  // Water-stain streak running down the stone beneath the spout
+  const stain = mesh(box(0.02, 0.50, 0.10), M.castleDark); stain.position.set(-0.452, 1.58, 0.16); g.add(stain);
+  // Weathering patches — dark aged stone just above the foundation
+  const wearF = mesh(box(0.12, 0.08, 0.02), M.castleDark); wearF.position.set( 0.21, 0.20,  0.445); g.add(wearF);
+  const wearB = mesh(box(0.12, 0.09, 0.02), M.castleDark); wearB.position.set(-0.20, 0.20, -0.445); g.add(wearB);
+  // Hanging chain beside the door arch — bracket + two offset links
+  const chainMt = mesh(box(0.06, 0.04, 0.05), M.catMetal);   chainMt.position.set(0.20, 0.58, 0.46);  g.add(chainMt);
+  const chainL1 = mesh(box(0.035, 0.10, 0.035), M.catMetal); chainL1.position.set(0.20, 0.51, 0.465); g.add(chainL1);
+  const chainL2 = mesh(box(0.035, 0.10, 0.035), M.catMetal); chainL2.position.set(0.21, 0.43, 0.47); chainL2.rotation.y = Math.PI / 4; g.add(chainL2);
   const hpBar = makeHPBar(g, 2.88);
   g.position.set(col, 0, row); g.scale.set(0.01, 0.01, 0.01);
   scene.add(g);
@@ -7097,7 +8363,7 @@ function buildCatapult(col, row) {
   scene.add(g);
   const stat = CFG.STATS.catapult;
   defenders.push({
-    type: 'catapult', group: g, col, row, armGroup,
+    type: 'catapult', group: g, col, row, armGroup, cw, cwChain,
     cooldown: 0, range: stat.range, dmg: stat.dmg, rate: stat.rate, pSpeed: stat.pSpeed, aoe: stat.aoe,
     hp: stat.hp, maxHp: stat.hp, hpBar: catHpBar, animScale: 0, armAnim: 0, spawnTime: performance.now(), alive: true,
   });
@@ -7166,7 +8432,10 @@ function buildMage(col, row) {
     type: 'mage', group: g, col, row,
     cooldown: 0, range: stat.range, dmg: stat.dmg, rate: stat.rate, pSpeed: stat.pSpeed,
     hp: stat.hp, maxHp: stat.hp, hpBar: mageHpBar, animScale: 0, spawnTime: performance.now(), alive: true,
-    legL, legR, armL, armR, idleTime: 0,
+    // Random start phase, matching buildSoldier. Starting every mage at 0 meant a
+    // group placed together breathed, swayed and pulsed its orb in perfect unison
+    // — the same lockstep tell that made the path lanterns read as fake.
+    legL, legR, armL, armR, idleTime: Math.random() * Math.PI * 2,
     orbBase, orbTip, hatTip: hat4,
   });
 }
@@ -7228,7 +8497,7 @@ function buildBallista(col, row) {
     type: 'ballista', group: g, pivot, col, row,
     cooldown: 0, range: stat.range, dmg: stat.dmg, rate: stat.rate, pSpeed: stat.pSpeed,
     hp: stat.hp, maxHp: stat.hp, hpBar: balHpBar, animScale: 0, spawnTime: performance.now(), alive: true,
-    scanTime: 0, bowL, bowR, string, firePhase: 0,
+    scanTime: 0, bowL, bowR, string, wheel, firePhase: 0,
   });
 }
 
@@ -7258,6 +8527,21 @@ function buildSpikeTrap(col, row) {
     const s3 = mesh(box(0.04, 0.08, 0.04), M.spikeGlow);  s3.position.set(0, 0.37, 0); sg.add(s3); // glowing tip
     spikeGroups.push(sg);
   });
+  // Corner bolt heads — 45°-turned nuts pinning the iron frame to the base plate
+  [[0.40,0.40],[0.40,-0.40],[-0.40,0.40],[-0.40,-0.40]].forEach(([bx,bz]) => {
+    const bolt = mesh(box(0.09, 0.06, 0.09), M.catMetal); bolt.position.set(bx, 0.15, bz); bolt.rotation.y = Math.PI / 4; g.add(bolt);
+  });
+  // Central gear disc — trigger mechanism the middle spike rises through (crossed plates = 8 teeth)
+  const gearA = mesh(box(0.28, 0.035, 0.28), M.catMetal); gearA.position.y = 0.10; g.add(gearA);
+  const gearB = mesh(box(0.28, 0.035, 0.28), M.catMetal); gearB.position.y = 0.10; gearB.rotation.y = Math.PI / 4; g.add(gearB);
+  // Warning chevron plates — glowing hazard V on both path-facing frame edges
+  [0.475, -0.475].forEach(cz => {
+    const chevL = mesh(box(0.13, 0.05, 0.03), M.spikeGlow); chevL.position.set(-0.06, 0.09, cz); chevL.rotation.z =  0.55; g.add(chevL);
+    const chevR = mesh(box(0.13, 0.05, 0.03), M.spikeGlow); chevR.position.set( 0.06, 0.09, cz); chevR.rotation.z = -0.55; g.add(chevR);
+  });
+  // Blood-rust stains — dried streaks on the wooden plate around the spikes
+  const rustA = mesh(box(0.20, 0.012, 0.14), M.arcBelt); rustA.position.set(-0.18, 0.086,  0.16); rustA.rotation.y =  0.4; g.add(rustA);
+  const rustB = mesh(box(0.14, 0.012, 0.18), M.arcBelt); rustB.position.set( 0.18, 0.086, -0.14); rustB.rotation.y = -0.3; g.add(rustB);
   const spikeHpBar = makeHPBar(g, 0.70);
   // hide HP bar since trap is indestructible
   spikeHpBar.bg.visible = false; spikeHpBar.fg.visible = false;
@@ -7277,7 +8561,7 @@ function buildSpikeTrap(col, row) {
 // ─────────────────────────────────────────────
 function buildSoldier(col, row, soldierType) {
   const g = new THREE.Group();
-  let lL, lR, armL, armR, weaponRef = null;
+  let lL, lR, armL, armR, weaponRef = null, headRef = null;
 
   if (soldierType === 'knight') {
     // ── KNIGHT / SWORDSMAN ──
@@ -7371,6 +8655,10 @@ function buildSoldier(col, row, soldierType) {
     // Neck + head with cloth cap
     const neck = mesh(box(0.18, 0.10, 0.18), M.skin);    neck.position.y = 0.98; g.add(neck);
     const head = mesh(box(0.38, 0.32, 0.36), M.skin);    head.position.y = 1.14; g.add(head);
+    // Nose bridge and short stubble beard
+    const swNose    = mesh(box(0.07, 0.07, 0.08), M.skin);    swNose.position.set(0, 1.17, 0.20); g.add(swNose);
+    const swStubble = mesh(box(0.22, 0.06, 0.06), M.arcBelt); swStubble.position.set(0, 1.08, 0.19); g.add(swStubble);
+    const swChin    = mesh(box(0.14, 0.05, 0.06), M.arcBelt); swChin.position.set(0, 1.03, 0.18); g.add(swChin);
     // Nasal helmet — brown leather cap with brow band, nose guard, ear guards, neck flap
     const helmCap  = mesh(box(0.40, 0.22, 0.40), M.spLeather); helmCap.position.set(0, 1.26, 0);      g.add(helmCap);   // main cap
     const helmBrow = mesh(box(0.42, 0.05, 0.42), M.spLeather); helmBrow.position.set(0, 1.16, 0);     g.add(helmBrow);  // brow rim
@@ -7379,6 +8667,14 @@ function buildSoldier(col, row, soldierType) {
     const helmEarR = mesh(box(0.06, 0.13, 0.26), M.spLeather); helmEarR.position.set(-0.24, 1.10, 0); g.add(helmEarR); // right ear guard
     const helmNeck = mesh(box(0.36, 0.10, 0.07), M.spLeather); helmNeck.position.set(0, 1.10, -0.20); g.add(helmNeck); // neck flap
     const helmPad  = mesh(box(0.38, 0.04, 0.38), M.arcBelt);   helmPad.position.set(0, 1.14, 0);      g.add(helmPad);  // brow padding
+    // Transverse crest — the swordsman's role marker. It was the one unit with no
+    // top feature at all, which left it and the spearman as the closest-reading
+    // pair. Deliberately runs SIDE-TO-SIDE: the knight's gold fin and spearman's
+    // cyan plume both run fore-aft, so this differs in silhouette from directly
+    // above, not just in colour. Sits on the cap top (y=1.37) and stays inside the
+    // cap's 0.40 width so it can't overhang or clip the ear guards.
+    const swCrestBase = mesh(box(0.34, 0.05, 0.12), M.swGold);  swCrestBase.position.set(0, 1.395, 0); g.add(swCrestBase);
+    const swCrestFin  = mesh(box(0.28, 0.14, 0.07), M.swCrest); swCrestFin.position.set(0, 1.47, 0);   g.add(swCrestFin);
     // Iron sword — swGrp rotated so tip points toward enemy (+Z of armR)
     const swGrp = new THREE.Group();
     swGrp.position.set(0, -0.20, 0.20);
@@ -7403,20 +8699,39 @@ function buildSoldier(col, row, soldierType) {
     // Waist belt with gold buckle
     const belt = mesh(box(0.48, 0.09, 0.3), M.arcBelt); belt.position.y = 0.5; g.add(belt);
     const buckle = mesh(box(0.1, 0.09, 0.07), M.swGold); buckle.position.set(0, 0.5, 0.17); g.add(buckle);
+    // Leather belt pouch on the right hip
+    const spPouch     = mesh(box(0.11, 0.13, 0.08), M.spLeather); spPouch.position.set(-0.19, 0.44, 0.15); g.add(spPouch);
+    const spPouchFlap = mesh(box(0.11, 0.05, 0.09), M.arcBelt);   spPouchFlap.position.set(-0.19, 0.49, 0.15); g.add(spPouchFlap);
     // Slate blue body with chest strap
     const body = mesh(box(0.48, 0.52, 0.3), M.spTunic); body.position.y = 0.71; g.add(body);
     const strap = mesh(box(0.06, 0.5, 0.07), M.arcBelt); strap.position.set(0.12, 0.72, 0.17); strap.rotation.z = 0.18; g.add(strap);
+    // Steel pauldron with gold rim on the spear-side shoulder
+    const spPad     = mesh(box(0.20, 0.12, 0.30), M.spHelmet); spPad.position.set(0.30, 0.94, 0.04); g.add(spPad);
+    const spPadTrim = mesh(box(0.21, 0.04, 0.31), M.swGold);   spPadTrim.position.set(0.30, 0.875, 0.04); g.add(spPadTrim);
     // Cape (behind body) — crimson red, very distinctive
     const cape = mesh(box(0.52, 0.6, 0.07), M.spCape); cape.position.set(0, 0.68, -0.2); g.add(cape);
     const capeBot = mesh(box(0.44, 0.18, 0.07), M.spCape); capeBot.position.set(0, 0.32, -0.2); g.add(capeBot);
+    // Round buckler shield strapped to left shoulder — visible behind the cape
+    const bucklerRim  = mesh(box(0.07, 0.40, 0.40), M.weapon);   bucklerRim.position.set(-0.30, 0.72, -0.28); g.add(bucklerRim);
+    const bucklerFace = mesh(box(0.05, 0.36, 0.36), M.swShield); bucklerFace.position.set(-0.30, 0.72, -0.28); g.add(bucklerFace);
+    const bucklerBoss = mesh(box(0.08, 0.09, 0.09), M.swGold);   bucklerBoss.position.set(-0.30, 0.72, -0.32); g.add(bucklerBoss);
+    const bucklerCross= mesh(box(0.04, 0.30, 0.04), M.swGold);   bucklerCross.position.set(-0.30, 0.72, -0.32); g.add(bucklerCross);
     // Arms — slate blue sleeves
     armL = mesh(box(0.16, 0.38, 0.16), M.spTunic); armL.position.set( 0.3, 0.72, 0.08); armL.rotation.z = -0.25; g.add(armL);
     armR = mesh(box(0.16, 0.38, 0.16), M.spTunic); armR.position.set( 0.3, 0.48, 0.08); armR.rotation.z =  0.15; g.add(armR);
+    // Round shield strapped to the left forearm — two stacked plates (one turned 45°) read as a disc; rides with armL
+    const armShield     = mesh(box(0.05, 0.40, 0.40), M.spHelmet); armShield.position.set(0.15, -0.06, 0); armL.add(armShield);
+    const armShieldOct  = mesh(box(0.05, 0.40, 0.40), M.spHelmet); armShieldOct.position.set(0.15, -0.06, 0); armShieldOct.rotation.x = Math.PI / 4; armL.add(armShieldOct);
+    const armShieldBoss = mesh(box(0.06, 0.12, 0.12), M.swGold);   armShieldBoss.position.set(0.185, -0.06, 0); armL.add(armShieldBoss);
     // Helmet with cheek guards
     const helmet = mesh(box(0.38, 0.28, 0.36), M.spHelmet); helmet.position.y = 1.13; g.add(helmet);
     const cheekL = mesh(box(0.08, 0.2, 0.3), M.spHelmet); cheekL.position.set( 0.22, 1.06, 0); g.add(cheekL);
     const cheekR = mesh(box(0.08, 0.2, 0.3), M.spHelmet); cheekR.position.set(-0.22, 1.06, 0); g.add(cheekR);
-    const plume  = mesh(box(0.08, 0.26, 0.28), M.spCape); plume.position.set(0, 1.4, -0.04); g.add(plume);
+    const plume  = mesh(box(0.08, 0.26, 0.28), M.spPlume); plume.position.set(0, 1.4, -0.04); g.add(plume);
+    // Plume upgrades — gold mounting rail, swept-back tail, raised front crest tip
+    const plumeBase  = mesh(box(0.10, 0.05, 0.34), M.swGold); plumeBase.position.set(0, 1.285, -0.04); g.add(plumeBase);
+    const plumeTail  = mesh(box(0.06, 0.16, 0.14), M.spPlume); plumeTail.position.set(0, 1.36, -0.22); g.add(plumeTail);
+    const plumeCrest = mesh(box(0.06, 0.10, 0.12), M.spPlume); plumeCrest.position.set(0, 1.55, 0.04); g.add(plumeCrest);
     const face   = mesh(box(0.26, 0.18, 0.06), M.skin); face.position.set(0, 1.1, 0.19); g.add(face);
     // Spear parented to armR (lower hand) — follows arm during thrust so tip drives forward
     const spearGroup = new THREE.Group(); spearGroup.position.set(0, 0.18, 0.02); armR.add(spearGroup);
@@ -7434,11 +8749,21 @@ function buildSoldier(col, row, soldierType) {
     // Teal legs
     lL = mesh(box(0.17, 0.36, 0.17), M.arcTeal); lL.position.set( 0.12, 0.28, 0); g.add(lL);
     lR = mesh(box(0.17, 0.36, 0.17), M.arcTeal); lR.position.set(-0.12, 0.28, 0); g.add(lR);
+    // Spare-arrow quiver strapped to the right thigh — parented to lR so it swings with the leg
+    const thighQuiver = mesh(box(0.08, 0.2, 0.08), M.spLeather);   thighQuiver.position.set(-0.11, 0.0, 0.03); lR.add(thighQuiver);
+    const thighArrowA = mesh(box(0.025, 0.08, 0.025), M.spearHead); thighArrowA.position.set(-0.12, 0.13, 0.02); lR.add(thighArrowA);
+    const thighArrowB = mesh(box(0.025, 0.08, 0.025), M.spearHead); thighArrowB.position.set(-0.10, 0.14, 0.05); lR.add(thighArrowB);
     // Belt
     const belt = mesh(box(0.44, 0.09, 0.28), M.arcBelt); belt.position.y = 0.5; g.add(belt);
     const pouch = mesh(box(0.12, 0.12, 0.09), M.arcBelt); pouch.position.set(-0.2, 0.48, 0.16); g.add(pouch);
     // Teal body tunic
     const body = mesh(box(0.44, 0.5, 0.28), M.arcTeal); body.position.y = 0.7; g.add(body);
+    // Diagonal quiver strap across the chest with gold clasp
+    const arcStrap = mesh(box(0.07, 0.52, 0.04), M.arcBelt); arcStrap.position.set(-0.04, 0.72, 0.155); arcStrap.rotation.z = -0.42; g.add(arcStrap);
+    const arcClasp = mesh(box(0.09, 0.09, 0.05), M.swGold);  arcClasp.position.set(-0.04, 0.74, 0.165); g.add(arcClasp);
+    // Short royal-blue cape-let draped over the shoulders — quiver worn over it
+    const capelet    = mesh(box(0.46, 0.26, 0.05), M.swTunic); capelet.position.set(0, 0.88, -0.175); g.add(capelet);
+    const capeletHem = mesh(box(0.40, 0.10, 0.05), M.swTunic); capeletHem.position.set(0, 0.72, -0.175); g.add(capeletHem);
     // Quiver on back with arrows
     const quiver = mesh(box(0.14, 0.42, 0.14), M.arcBelt); quiver.position.set(-0.24, 0.72, -0.2); g.add(quiver);
     for (let ai = 0; ai < 4; ai++) {
@@ -7478,6 +8803,8 @@ function buildSoldier(col, row, soldierType) {
 
     // Right arm — draw arm
     armR = mesh(box(0.14, 0.36, 0.14), M.arcTeal); armR.position.set(-0.3, 0.72, 0.05); g.add(armR);
+    // Leather arm guard on the draw forearm — moves with armR
+    const drawGuard = mesh(box(0.16, 0.13, 0.16), M.arcBelt); drawGuard.position.set(0, -0.09, 0); armR.add(drawGuard);
     // Nocked arrow — shaft, tip, and two crossed fletchings parented to draw arm
     const nockShaft = mesh(box(0.030, 0.48, 0.030), M.catWood); nockShaft.position.set(-0.02, -0.08, 0.24); armR.add(nockShaft);
     const arrowTip  = mesh(box(0.055, 0.11, 0.055), M.spearHead); arrowTip.position.set(-0.02,  0.19, 0.24); armR.add(arrowTip);
@@ -7486,7 +8813,17 @@ function buildSoldier(col, row, soldierType) {
     const fletchV   = mesh(box(0.020, 0.10, 0.080), M.arcTeal); fletchV.position.set(-0.02, -0.30, 0.24); armR.add(fletchV);
     // Hood
     const hood = mesh(box(0.38, 0.4, 0.38), M.arcHood); hood.position.y = 1.12; g.add(hood);
+    headRef = hood; // stored so the aim pose can cock the head over the arrow
+    // Hood peak — raised crown block with a swept-back tip
+    const hoodPeak = mesh(box(0.24, 0.13, 0.26), M.arcHood); hoodPeak.position.set(0, 1.37, -0.03); g.add(hoodPeak);
+    const hoodTip  = mesh(box(0.11, 0.10, 0.14), M.arcHood); hoodTip.position.set(0, 1.44, -0.12); hoodTip.rotation.x = -0.35; g.add(hoodTip);
     const face2 = mesh(box(0.26, 0.2, 0.08), M.skin); face2.position.set(0, 1.1, 0.2); g.add(face2);
+    // Nose bump and chin visible under the hood shadow
+    const arcNose = mesh(box(0.06, 0.06, 0.07), M.skin); arcNose.position.set(0, 1.13, 0.25); g.add(arcNose);
+    const arcChin = mesh(box(0.14, 0.05, 0.06), M.skin); arcChin.position.set(0, 1.04, 0.25); g.add(arcChin);
+    // Piercing eyes recessed under the hood
+    const arcEyeL = mesh(box(0.07, 0.055, 0.04), M.castleDark); arcEyeL.position.set( 0.08, 1.15, 0.24); g.add(arcEyeL);
+    const arcEyeR = mesh(box(0.07, 0.055, 0.04), M.castleDark); arcEyeR.position.set(-0.08, 1.15, 0.24); g.add(arcEyeR);
   }
 
   const soldierHpBar = makeHPBar(g, 1.72);
@@ -7499,7 +8836,7 @@ function buildSoldier(col, row, soldierType) {
     hp: stat.hp, maxHp: stat.hp, hpBar: soldierHpBar,
     animScale: 0, spawnTime: performance.now(), alive: true, legL: lL, legR: lR, armL, armR,
     idleTime: Math.random() * Math.PI * 2,
-    attackedBy: null, state: 'idle', chaseTarget: null, weapon: weaponRef,
+    attackedBy: null, state: 'idle', chaseTarget: null, weapon: weaponRef, head: headRef,
   });
 }
 
@@ -7511,7 +8848,10 @@ function addUpgradeIndicator(def) {
   // Remove old gem meshes
   const toRemove = [];
   def.group.traverse(child => { if (child.userData.isUpgradeGem) toRemove.push(child); });
-  toRemove.forEach(child => { def.group.remove(child); child.geometry.dispose(); });
+  // Dispose the material too, not just the geometry: every gem below allocates its
+  // own MeshStandardMaterial, so releasing only the geometry leaked one material per
+  // gem on each re-upgrade. updateKillPips (just below) already does both.
+  toRemove.forEach(child => { def.group.remove(child); child.geometry.dispose(); child.material?.dispose(); });
   // Add gems based on level
   const gemCount = def.level - 1; // level 2 = 1 gem, level 3 = 2 gems
   const colors = [0xffd040, 0xff8820]; // yellow, orange
@@ -7555,13 +8895,20 @@ function tryUpgradeDefender(col, row) {
   const def = defenders.find(d => d.col === col && d.row === row && d.alive);
   if (!def) return;
   if (def.type === 'spiketrap') { showTooltip('Spike traps cannot be upgraded!', 1800); return; }
-  if (def.type === 'wall') { showTooltip('Walls cannot be upgraded!', 1800); return; }
   const level = def.level || 1;
   if (level >= 3) {
     showTooltip('Max level!', 1500);
     return;
   }
-  const killsNeeded = level === 1 ? 10 : 25;
+  // Walls upgrade into shooting emplacements (Lv2 = Archer, Lv3 = Catapult). The whole
+  // path was already built — panel labels, cost/kill formulas, the firing branch in
+  // updateDefenders, even a wall-specific gem offset — but two guards (here and the
+  // panel) made it unreachable, so it was dead code.
+  //
+  // A plain wall can never score a kill, so the first upgrade has to be kill-free;
+  // the second requires 15, which the Lv2 archer-wall can now actually earn.
+  const isWall = def.type === 'wall';
+  const killsNeeded = isWall ? (level === 1 ? 0 : 15) : (level === 1 ? 10 : 25);
   if ((def.kills || 0) < killsNeeded) {
     showTooltip(`Need ${killsNeeded} kills to upgrade! (${def.kills || 0}/${killsNeeded})`, 2000);
     return;
@@ -7575,13 +8922,36 @@ function tryUpgradeDefender(col, row) {
   gold -= cost;
   def.level = level + 1;
   SND.upgrade();
-  // Boost stats using per-type multipliers from CFG.UPGRADE_STATS
-  const um = CFG.UPGRADE_STATS[def.type] || { dmg: 1.35, range: 1.15, rate: 1.25, hp: 1.40 };
-  def.dmg   = (def.dmg   || 1) * um.dmg;
-  def.range = (def.range || 3) * um.range;
-  def.rate  = (def.rate  || 1) * um.rate;
-  def.maxHp = Math.floor(def.maxHp * um.hp);
-  def.hp    = Math.min(def.maxHp, def.hp + Math.floor(def.maxHp * 0.3));
+  if (isWall) {
+    // A wall has no range/rate/dmg at all, so the generic multipliers below would be
+    // multiplying `|| fallback` defaults into meaningless numbers. Assign the combat
+    // stats outright instead.
+    //
+    // Deliberately WEAKER than the real Archer (8.0/1.9/3) and Catapult (8.5/0.4/8):
+    // a wall is 14g and costs ZERO unit slots, so a fully-upgraded one must not
+    // outclass the units that pay 55g and a slot for the same job. It buys a little
+    // chip damage on top of the blocking you already wanted. These six numbers are
+    // the tuning knobs if it lands too weak or too strong in play.
+    // Sized against actual exposure time, not vibes. A grunt is 18 HP at speed 3.4,
+    // so it crosses a range-R bubble in about 2R/3.4 seconds. At the first draft
+    // (2 dmg, 1.0/s, range 5.5) that was ~3 shots for 6 of its 18 HP — the upgrade
+    // literally could not finish anything, which reads as broken rather than weak.
+    if (def.level === 2) {            // Archer wall — ~2.7 dps over ~3.5s ≈ 9 dmg/pass
+      def.dmg = 3; def.range = 6.0; def.rate = 0.9;
+    } else {                          // Catapult wall — slower, heavier, splashes
+      def.dmg = 7; def.range = 7.0; def.rate = 0.4; def.aoe = 1.7;
+    }
+    def.maxHp = Math.floor(def.maxHp * 1.25);
+    def.hp    = Math.min(def.maxHp, def.hp + Math.floor(def.maxHp * 0.3));
+  } else {
+    // Boost stats using per-type multipliers from CFG.UPGRADE_STATS
+    const um = CFG.UPGRADE_STATS[def.type] || { dmg: 1.35, range: 1.15, rate: 1.25, hp: 1.40 };
+    def.dmg   = (def.dmg   || 1) * um.dmg;
+    def.range = (def.range || 3) * um.range;
+    def.rate  = (def.rate  || 1) * um.rate;
+    def.maxHp = Math.floor(def.maxHp * um.hp);
+    def.hp    = Math.min(def.maxHp, def.hp + Math.floor(def.maxHp * 0.3));
+  }
   updateHUD();
   addUpgradeIndicator(def);
   SND.build();
@@ -7724,6 +9094,56 @@ function fireProjectile(type, source, target, aoeRadius) {
   });
 }
 
+// ─────────────────────────────────────────────
+//  PROJECTILE TRAILS — small shrinking voxel motes left behind in-flight shots.
+//  Fully pooled: shared geometry + one shared material per projectile type, so the
+//  whole system allocates nothing during gameplay. Scale-shrink only (no opacity
+//  animation) keeps materials shared.
+// ─────────────────────────────────────────────
+const _TRAIL_CAP = 180;
+const _trailGeo = new THREE.BoxGeometry(0.09, 0.09, 0.09);
+const _trailMats = {
+  bolt:   new THREE.MeshBasicMaterial({ color: 0x55e6ff, transparent: true, opacity: 0.50, depthWrite: false }),
+  orb:    new THREE.MeshBasicMaterial({ color: 0xcc66ff, transparent: true, opacity: 0.50, depthWrite: false }),
+  bbolt:  new THREE.MeshBasicMaterial({ color: 0xffcc44, transparent: true, opacity: 0.50, depthWrite: false }),
+  rock:   new THREE.MeshBasicMaterial({ color: 0x99752a, transparent: true, opacity: 0.32, depthWrite: false }),
+  eMagic: new THREE.MeshBasicMaterial({ color: 0xff3322, transparent: true, opacity: 0.50, depthWrite: false }),
+};
+const _trailPool = [];
+const _trails = [];   // { mesh, life, maxLife }
+function spawnTrail(type, pos) {
+  const mat = _trailMats[type];
+  if (!mat || _trails.length >= _TRAIL_CAP) return;
+  let m = _trailPool.pop();
+  if (!m) { m = new THREE.Mesh(_trailGeo, mat); m.castShadow = false; m.receiveShadow = false; }
+  m.material = mat;
+  m.position.copy(pos);
+  m.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+  m.scale.setScalar(1);
+  scene.add(m);
+  _trails.push({ mesh: m, life: 0.28, maxLife: 0.28 });
+}
+function updateTrails(dt) {
+  for (let i = _trails.length - 1; i >= 0; i--) {
+    const tr = _trails[i];
+    tr.life -= dt;
+    if (tr.life <= 0) {
+      scene.remove(tr.mesh);
+      _trailPool.push(tr.mesh);
+      _trails.splice(i, 1);
+      continue;
+    }
+    tr.mesh.scale.setScalar(Math.max(0.05, tr.life / tr.maxLife));
+  }
+}
+function clearTrails() {
+  for (const tr of _trails) {
+    scene.remove(tr.mesh);
+    _trailPool.push(tr.mesh);
+  }
+  _trails.length = 0;
+}
+
 // AoE splash: damage every live orc within `radius` of `center`, excluding `primary`
 // (which already took the direct hit). Awards kill pips to `sourceDef`. Shared by
 // direct catapult/wall hits and the last-position detonation path.
@@ -7747,16 +9167,17 @@ function updateProjectiles(dt) {
     }
 
     // ── Resolve aim point (no per-frame allocation; reuses module temps) ──
-    // If a homing target dies mid-flight but this is a player AoE shot, coast to the
-    // target's last-known position and still detonate there — fixes catapult/wall splash
-    // shots "fizzling" in mid-air when their primary target dies just before impact.
+    // If a homing target dies mid-flight but this is an AoE shot (player catapult/wall OR
+    // enemy rock-troll boulder), coast to the target's last-known position and still
+    // detonate there — splash shots shouldn't "fizzle" in mid-air when their primary
+    // target dies just before impact.
     const aimAlive = !!(p.target && p.target.alive);
     if (aimAlive) {
       const yAim = p.isEnemyProjectile ? 0.8 : (0.8 * (p.target.scale || 1));
       const tp = p.target.group.position;
       _projTgt.set(tp.x, tp.y + yAim, tp.z);
       p._lx = _projTgt.x; p._ly = _projTgt.y; p._lz = _projTgt.z;   // remember impact point
-    } else if (p.aoeRadius > 0 && !p.isEnemyProjectile && p._lx !== undefined) {
+    } else if (p.aoeRadius > 0 && p._lx !== undefined) {
       _projTgt.set(p._lx, p._ly, p._lz);
     } else {
       p.alive = false; continue;
@@ -7768,8 +9189,9 @@ function updateProjectiles(dt) {
 
     if (dist < 0.35 || step >= dist) {
       if (p.isEnemyProjectile) {
-        dealDefenderDamage(p.target, p.dmg, p.shooter);
-        // AoE for enemy rocks
+        // Direct hit only if the target is still alive — a coasting AoE boulder skips it
+        if (aimAlive) dealDefenderDamage(p.target, p.dmg, p.shooter);
+        // AoE for enemy rocks (also fires on last-position detonation)
         if (p.aoeRadius > 0) {
           const aoeR2 = p.aoeRadius * p.aoeRadius;
           defenders.forEach(d => {
@@ -7834,6 +9256,10 @@ function updateProjectiles(dt) {
 
     dir.normalize().multiplyScalar(step);
     p.mesh.position.add(dir);
+
+    // Emit a trail mote every ~30 ms of flight (types without a trail material no-op)
+    p._trailT = (p._trailT ?? 0) - dt;
+    if (p._trailT <= 0) { p._trailT = 0.03; spawnTrail(p.type, p.mesh.position); }
 
     // Wall collision — player projectiles are stopped by player-placed walls.
     // Use swept segment (prevPos → newPos) so fast projectiles can't tunnel through.
@@ -7944,12 +9370,24 @@ function dealDamage(orc, dmg, attacker = null) {
       const curF = orc.fightingDefender;
       const curIsMelee = curF && (curF.type === 'knight' || curF.type === 'swordsman' || curF.type === 'spearman');
       if (!curIsMelee) {
-        if (curF) releaseAttackSlot(curF, orc);
-        orc.attackSlot       = acquireAttackSlot(attacker, orc);
-        orc.fightingDefender = attacker;
-        orc.chasingDefender  = null;
-        orc.defAttackTimer   = 0;
-        orc.swingPhase = 0; orc.swingHit = false; orc.swingDamageReady = false;
+        // Acquire BEFORE releasing: acquireAttackSlot returns -1 when the defender is
+        // already at maxSlots, and this path used to commit fightingDefender anyway.
+        // That made the per-defender attacker cap (swordsman 2, spearman 3, knight 4)
+        // unenforceable — a whole pack could pile onto one unit — and slot -1 feeds
+        // attackSlotDist as Math.floor(-1/4) = -1, collapsing the stand-off distance
+        // to ~0.15 so attackers ended up standing inside the defender's own model.
+        // Releasing first would also have cost the orc its existing slot for nothing.
+        const _snapSlot = acquireAttackSlot(attacker, orc);
+        if (_snapSlot >= 0) {
+          if (curF) releaseAttackSlot(curF, orc);
+          orc.attackSlot       = _snapSlot;
+          orc.fightingDefender = attacker;
+          orc.chasingDefender  = null;
+          orc.defAttackTimer   = 0;
+          orc.swingPhase = 0; orc.swingHit = false; orc.swingDamageReady = false;
+        }
+        // else: defender is full — the counter-attack damage still landed above, the
+        // orc simply keeps its current target instead of joining an over-full scrum.
       }
     }
   }
@@ -7962,19 +9400,31 @@ function dealDamage(orc, dmg, attacker = null) {
     orc.deathDir = Math.random() < 0.5 ? 1 : -1;
     if (orc.hpBar) { orc.hpBar.bg.visible = false; orc.hpBar.fg.visible = false; }
     SND.dieEnemy(orc.type);
-    kills++;
-    // Achievements: lifetime kill count + boss-killed flags
-    _bumpStat('kills', 1);
-    if (orc.isLevelBoss) {
-      _unlockAchievement('bossKill');
-      // Flawless: no defender deaths during this wave AND boss is now dead
-      if (waveDefDeaths === 0) _unlockAchievement('flawlessBoss');
+    // Economy and score are skipped in the Test Arena, the same way the
+    // _testOnEnemyKilled hook just below is already scoped to it. Defenders are free
+    // and uncapped in there (`if (!testMode) gold -= cost`), so an unguarded kill
+    // reward let the sandbox mint unlimited gold, and _bumpStat writes straight
+    // through to td_achievements — meaning sandbox kills permanently inflated the
+    // lifetime counter and popped Centurion / Slayer-of-a-Thousand for enemies the
+    // player never actually defended against. The arena keeps its own tally in
+    // _bs.goldEarned, so the test panel's numbers are unaffected.
+    if (!testMode) {
+      kills++;
+      // Achievements: lifetime kill count + boss-killed flags
+      _bumpStat('kills', 1);
+      if (orc.isLevelBoss) {
+        _unlockAchievement('bossKill');
+        // Flawless: no defender deaths during this wave AND boss is now dead
+        if (waveDefDeaths === 0) _unlockAchievement('flawlessBoss');
+      }
+      gold += orc.reward;
+      SND.goldGain();  // throttled — coin tinkle on reward
+      // Inside the guard too: a coin sound and a +gold popup for gold that is never
+      // credited would just be lying to the player about what the arena does.
+      spawnGoldPopup(orc.reward, posAbove(orc.group.position, 1.2));
     }
-    gold += orc.reward;
-    SND.goldGain();  // throttled — coin tinkle on reward
     window._testOnEnemyKilled?.(orc);
     updateHUD();
-    spawnGoldPopup(orc.reward, posAbove(orc.group.position, 1.2));
     // Themed death particles — colour keyed to enemy type for instant read
     const _deathColor = { skeleton: 0xddddb0, wolf: 0x99889a,
       spider: 0x440011, troll: 0x4aaa00, boss: 0x9900dd, orcMage: 0xdd2200,
@@ -8193,15 +9643,29 @@ function updateDefenders(dt, t) {
       d.deathTimer = d._deathStartMs ? (performance.now() - d._deathStartMs) / 1000 : d.deathTimer + dt;
       const isSoldier = d.type === 'knight' || d.type === 'swordsman' || d.type === 'spearman' || d.type === 'archer';
       const TOTAL = isSoldier ? 0.70 : 0.55;
-      const f = Math.min(1, d.deathTimer / TOTAL);
+      const STAG = isSoldier ? 0.20 : 0.12; // brief backward stagger before the fall/shrink
+      const f = Math.min(1, Math.max(0, d.deathTimer - STAG) / (TOTAL - STAG));
       if (isSoldier) {
-        // Soldiers fall sideways and sink into ground
-        d.group.rotation.z = d.deathDir * f * (Math.PI / 2);
-        d.group.position.y = -f * 0.35;
+        if (d.deathTimer < STAG) {
+          // Knees-buckle lurch backward — one beat of impact before the topple
+          const sf = d.deathTimer / STAG;
+          d.group.rotation.x = -Math.sin(sf * Math.PI) * 0.26;
+          d.group.position.y = -Math.sin(sf * Math.PI) * 0.05;
+          d.group.rotation.z = 0;
+        } else {
+          d.group.rotation.x = 0; // stagger fully released — no residual lean into the fall
+          // Soldiers fall sideways and sink into ground
+          d.group.rotation.z = d.deathDir * f * (Math.PI / 2);
+          d.group.position.y = -f * 0.35;
+        }
       } else {
-        // Wall / tower / catapult: burst crumble particles then vanish
-        if (!d.crumbleSpawned) { d.crumbleSpawned = true; spawnCrumbleParticles(d.group.position); }
-        d.group.scale.setScalar(Math.max(0, 1 - d.deathTimer * 7));
+        if (d.deathTimer < STAG) {
+          d.group.rotation.x = -(d.deathTimer / STAG) * 0.12; // structure rocks back before giving way
+        } else {
+          // Wall / tower / catapult: burst crumble particles then vanish
+          if (!d.crumbleSpawned) { d.crumbleSpawned = true; spawnCrumbleParticles(d.group.position); }
+          d.group.scale.setScalar(Math.max(0, 1 - (d.deathTimer - STAG) * 7));
+        }
       }
       if (d.deathTimer >= TOTAL) {
         if (d._rallyMarker) { scene.remove(d._rallyMarker); d._rallyMarker = null; }
@@ -8217,7 +9681,9 @@ function updateDefenders(dt, t) {
       // Use real elapsed time so spawn animation works even when game is paused
       d.animScale = Math.min(1, (performance.now() - d.spawnTime) / 350);
       const s = easeOutBounce(d.animScale);
-      d.group.scale.set(s, s, s);
+      // Squash-and-stretch: Y dips then overshoots (~1.08) before settling — placement pops
+      const sq = d.animScale < 1 ? Math.sin(d.animScale * Math.PI * 2) * 0.14 * (1 - d.animScale * 0.55) : 0;
+      d.group.scale.set(s * (1 + sq * 0.5), s * (1 - sq), s * (1 + sq * 0.5)); // exact (1,1,1) at animScale=1
     }
 
     updateDefHit(d, dt); // flash + stagger — runs for ALL types before any continue
@@ -8229,7 +9695,14 @@ function updateDefenders(dt, t) {
       if ((d.hitRecoilT || 0) <= 0) {
         d.group.position.y = Math.abs(Math.sin(d._idleTime * 0.55 + d.col * 0.3)) * 0.014;
       }
-      continue;
+      // Only PLAIN walls stop here. An upgraded wall (Lv2 Archer / Lv3 Catapult) has to
+      // fall through to the targeting and firing code below — this `continue` used to be
+      // unconditional, which is what actually kept the wall-shooting feature dead. It
+      // even made the downstream guard "non-upgraded walls don't shoot" and the whole
+      // `d.type === 'wall' && d.level >= 2` firing branch unreachable.
+      // Falling through is safe: the melee state machine is gated on knight/swordsman/
+      // spearman, and the animation blocks are all guarded on parts a wall doesn't have.
+      if ((d.level || 1) < 2) continue;
     }
 
     // ── ACTIVE MELEE STATE MACHINE (knight / swordsman / spearman) ──────────────────
@@ -8283,28 +9756,29 @@ function updateDefenders(dt, t) {
           }
         }
         d.group.rotation.y = Math.atan2(dx, dz);
-        // Knight adopts heavier forward lean; swordsman stays springy, spearman middle
-        d.group.rotation.x = d.type === 'knight' ? 0.13 : 0.09;
+        // Forward lean scales with walk speed — heavier knight still hunches the most
+        d.group.rotation.x = (d.type === 'knight' ? 0.10 : 0.05) + baseSpd * 0.013;
         // Gait frequency tracks walk speed — slower legs for knight, quicker for swordsman
         const s  = d.idleTime * (5.5 * (baseSpd / 2.8));
         const ss = Math.sin(s);
         const sc = Math.cos(s * 0.5);
+        const sq = stepAnim(ss, 4); // 4-frame flipbook — chunky voxel limb keyframes
         d.group.rotation.z = sc * 0.058;                        // hip rock at half gait frequency
         d.group.position.y = ss * ss * 0.12;                    // quadratic — weight on ground, quick lift
-        if (d.legL) { d.legL.position.y = 0.28 + ss*0.16; d.legL.rotation.x =  ss*0.62; d.legL.rotation.z =  ss*0.05; }
-        if (d.legR) { d.legR.position.y = 0.28 - ss*0.16; d.legR.rotation.x = -ss*0.62; d.legR.rotation.z = -ss*0.05; }
-        // Type-specific arm behaviour during walk
+        if (d.legL) { d.legL.position.y = 0.28 + sq*0.16; d.legL.rotation.x =  sq*0.62; d.legL.rotation.z =  sq*0.05; }
+        if (d.legR) { d.legR.position.y = 0.28 - sq*0.16; d.legR.rotation.x = -sq*0.62; d.legR.rotation.z = -sq*0.05; }
+        // Type-specific arm behaviour during walk — arms counter-swing opposite their leg (natural gait)
         if (d.type === 'knight') {
           // Shield arm held semi-firm; sword arm pumps strongly
-          if (d.armL) { d.armL.rotation.x =  ss*0.42; d.armL.rotation.z =  0.28 + sc*0.07; }
-          if (d.armR) { d.armR.rotation.x = -ss*0.84; d.armR.rotation.z = -sc*0.11; }
+          if (d.armL) { d.armL.rotation.x = -sq*0.42; d.armL.rotation.z =  0.28 + sc*0.07; }
+          if (d.armR) { d.armR.rotation.x =  sq*0.84; d.armR.rotation.z = -sc*0.11; }
         } else if (d.type === 'spearman') {
-          // Spear arm held upright and forward; off-hand pumps
-          if (d.armL) { d.armL.rotation.x =  ss*0.85; d.armL.rotation.z =  sc*0.10; }
-          if (d.armR) { d.armR.rotation.x = -0.28 - ss*0.44; d.armR.rotation.z = -sc*0.09; }
+          // Spear arm held forward with a modest counter-pump; off-hand swings opposite its leg
+          if (d.armL) { d.armL.rotation.x = -sq*0.85; d.armL.rotation.z =  sc*0.10; }
+          if (d.armR) { d.armR.rotation.x = -0.28 + sq*0.44; d.armR.rotation.z = -sc*0.09; }
         } else {
-          if (d.armL) { d.armL.rotation.x =  ss*0.80; d.armL.rotation.z =  sc*0.11; }
-          if (d.armR) { d.armR.rotation.x = -ss*0.80; d.armR.rotation.z = -sc*0.11; }
+          if (d.armL) { d.armL.rotation.x = -sq*0.80; d.armL.rotation.z =  sc*0.11; }
+          if (d.armR) { d.armR.rotation.x =  sq*0.80; d.armR.rotation.z = -sc*0.11; }
         }
       };
 
@@ -8332,17 +9806,20 @@ function updateDefenders(dt, t) {
         const ws2    = Math.sin(d.idleTime * 0.33 + 0.8);
         const slow   = Math.sin(d.idleTime * 0.20);  // slow look-around
         const bob    = Math.sin(d.idleTime * 0.95);  // body bob frequency
+        // Occasional weight-shift (~0.15Hz real) — cubed sine dwells centred, then settles onto one hip
+        const wsl    = Math.sin(d.idleTime * 0.63);
+        const hip    = wsl * wsl * wsl;
 
         // Gentle body bob — soldier shifts weight while standing at ready
         d.group.position.y = Math.max(0, bob * 0.06);
         // Layered weight shift — more visible than before
-        d.group.rotation.z = ws * 0.055 + ws2 * 0.022;
+        d.group.rotation.z = ws * 0.055 + ws2 * 0.022 + hip * 0.035;
         // Slow look toward incoming path, slight head-turn
         d.group.rotation.y = -Math.PI / 2 + slow * 0.14;
 
-        // Legs: real weight shift — one foot lifts as the other plants
-        if (d.legL) { d.legL.rotation.x =  ws * 0.22; d.legL.position.y = 0.28 + ws * 0.09; }
-        if (d.legR) { d.legR.rotation.x = -ws * 0.22; d.legR.position.y = 0.28 - ws * 0.09; }
+        // Legs: real weight shift — one foot lifts as the other plants; loaded leg compresses on hip-shift
+        if (d.legL) { d.legL.rotation.x =  ws * 0.22; d.legL.position.y = 0.28 + ws * 0.09 - hip * 0.02; }
+        if (d.legR) { d.legR.rotation.x = -ws * 0.22; d.legR.position.y = 0.28 - ws * 0.09 + hip * 0.02; }
 
         // Arms: type-specific idle stance
         const s2 = Math.sin(d.idleTime * 0.62 + 1.2);
@@ -8389,9 +9866,15 @@ function updateDefenders(dt, t) {
               if (!d.chaseTarget.fightingDefender) {
                 d.chaseTarget.chasingDefender = null;
               } else if (d.chaseTarget.fightingDefender.type === 'tower' || d.chaseTarget.fightingDefender.type === 'catapult') {
-                releaseAttackSlot(d.chaseTarget.fightingDefender, d.chaseTarget);
-                d.chaseTarget.attackSlot = acquireAttackSlot(d, d.chaseTarget);
-                d.chaseTarget.fightingDefender = d; d.chaseTarget.chasingDefender = null; d.chaseTarget.defAttackTimer = 0;
+                // Same gating as the enemy-initiated paths: only steal the enemy off
+                // its tower/catapult target if this melee unit actually has room for
+                // it, and don't release the old slot until the new one is secured.
+                const _ovSlot = acquireAttackSlot(d, d.chaseTarget);
+                if (_ovSlot >= 0) {
+                  releaseAttackSlot(d.chaseTarget.fightingDefender, d.chaseTarget);
+                  d.chaseTarget.attackSlot = _ovSlot;
+                  d.chaseTarget.fightingDefender = d; d.chaseTarget.chasingDefender = null; d.chaseTarget.defAttackTimer = 0;
+                }
               }
               const kl = dist || 1;
               d.chaseTarget.group.position.x += (dx/kl)*0.12;
@@ -8437,8 +9920,19 @@ function updateDefenders(dt, t) {
           } else {
             d.group.rotation.z = Math.sin(d.idleTime*0.55)*0.016;
             const b2 = Math.sin(d.idleTime*0.9), s2 = Math.sin(d.idleTime*0.75+1.1);
-            if (d.armL) { d.armL.rotation.x = -0.18 + b2*0.07; d.armL.rotation.z =  0.16 + s2*0.04; }
-            if (d.armR) { d.armR.rotation.x =  0.12 - b2*0.07; d.armR.rotation.z = -s2*0.04; }
+            if (d.type === 'spearman') {
+              // Brace between thrusts — hunker behind the armL buckler, spear hand coiled back
+              const wantBrace = d.cooldown > 0 ? 1 : 0;
+              d.braceT = (d.braceT ?? 0) + (wantBrace - (d.braceT ?? 0)) * Math.min(1, dt * 5);
+              const br = d.braceT;
+              d.group.position.y = -0.05 * br;   // slight crouch — weight sinks into the stance
+              d.group.rotation.x =  0.09 * br;   // hunkers toward the enemy
+              if (d.armL) { d.armL.rotation.x = -0.50*br + b2*0.05; d.armL.rotation.z = 0.16 + 0.26*br + s2*0.03; } // shield raised across
+              if (d.armR) { d.armR.rotation.x = -0.30*br - b2*0.05; d.armR.rotation.z = -s2*0.04; }                 // spear coiled, ready
+            } else {
+              if (d.armL) { d.armL.rotation.x = -0.18 + b2*0.07; d.armL.rotation.z =  0.16 + s2*0.04; }
+              if (d.armR) { d.armR.rotation.x =  0.12 - b2*0.07; d.armR.rotation.z = -s2*0.04; }
+            }
           }
         }
 
@@ -8499,10 +9993,13 @@ function updateDefenders(dt, t) {
         const wshift  = Math.sin(d.idleTime * 0.55);
         const wshift2 = Math.sin(d.idleTime * 0.33 + 0.9);
         const ibob    = Math.sin(d.idleTime * 0.95);
+        // Occasional weight-shift (~0.15Hz real) — cubed sine dwells centred, then settles onto one hip
+        const wslow   = Math.sin(d.idleTime * 0.63);
+        const hip2    = wslow * wslow * wslow;
         d.group.position.y = Math.max(0, ibob * 0.05);
-        d.group.rotation.z = wshift * 0.050 + wshift2 * 0.020;
-        if (d.legL) { d.legL.rotation.x =  wshift * 0.20; d.legL.position.y = 0.28 + wshift * 0.08; }
-        if (d.legR) { d.legR.rotation.x = -wshift * 0.20; d.legR.position.y = 0.28 - wshift * 0.08; }
+        d.group.rotation.z = wshift * 0.050 + wshift2 * 0.020 + hip2 * 0.030;
+        if (d.legL) { d.legL.rotation.x =  wshift * 0.20; d.legL.position.y = 0.28 + wshift * 0.08 - hip2 * 0.02; }
+        if (d.legR) { d.legR.rotation.x = -wshift * 0.20; d.legR.position.y = 0.28 - wshift * 0.08 + hip2 * 0.02; }
       }
 
       // Archer: armL holds bow, armR draws string — both string halves animate
@@ -8526,7 +10023,10 @@ function updateDefenders(dt, t) {
           d.armR.rotation.z = -effDraw * 0.26; // elbow lifts as drawn
           d.armR.rotation.y =  effDraw * 0.18; // elbow swings back and out
         }
-        d.group.rotation.z += effDraw * 0.05; // body leans slightly into draw
+        const drawRel = Math.sin((d.drawPhase || 0) * Math.PI); // release bell — 0 outside drawPhase
+        d.group.rotation.z += effDraw * 0.05 + drawRel * 0.04; // leans into draw; dips toward quiver side on release
+        // Head cocks over the arrow while aiming, chin drops to sight — settles level as aimBlend decays
+        if (d.head) { d.head.rotation.z = effDraw * 0.05 - drawRel * 0.03; d.head.rotation.x = -effDraw * 0.04; }
         // Bow string: midpoint pulls backward (away from enemy) as draw increases
         if (d.weapon && d.weapon.userData.strUp) {
           let strMidX = 0.07 - effDraw * 0.17; // +0.07 at rest → -0.10 fully drawn
@@ -8549,6 +10049,7 @@ function updateDefenders(dt, t) {
           if (d.armL) { d.armL.rotation.x = 0.65 + flinch * 0.55; d.armL.rotation.z = 0.10 + flinch * 0.38; }
           if (d.armR) { d.armR.rotation.x = 0.30 + flinch * 0.45; d.armR.rotation.z =  flinch * 0.24; d.armR.rotation.y = 0; }
           d.group.rotation.x = -flinch * 0.14;  // torso snaps back from the impact
+          if (d.head) { d.head.rotation.x = -flinch * 0.10; d.head.rotation.z = 0; } // head whips back with torso, aim-tilt cleared
           d.aimBlend = Math.max(0, d.aimBlend - dt * 2);  // aim is lost — recover on next shot
           d.drawPhase = 0;
         }
@@ -8600,15 +10101,23 @@ function updateDefenders(dt, t) {
         d.crystal.rotation.y += dt * 1.2;
       }
       d.crystal.position.y = d.crystal.userData.floatBase + Math.sin(d._floatTime * 2 + d.col) * 0.1;
+      // Orbiting shard — lazy drift that whips into a spin-up while the crystal discharges
+      const shard = d.crystalParts && d.crystalParts[3];
+      if (shard) {
+        d._orbT = (d._orbT || 0) + dt * (1.4 + (d.firePhase || 0) * 7);
+        shard.position.x = Math.cos(d._orbT) * 0.26;
+        shard.position.z = Math.sin(d._orbT) * 0.26;
+      }
       // Fire flash — crystal scales up briefly, base rocks back from the shot
       if ((d.firePhase || 0) > 0) {
         d.firePhase = Math.max(0, d.firePhase - dt * 4);
         const flash = Math.sin(d.firePhase * Math.PI); // bell 0→1→0
-        const scl = 1 + flash * 0.28;
+        const scl = 1 + flash * 0.34; // punchier, brighter-reading pulse
         if (d.crystalParts) {
           for (const p of d.crystalParts) p.scale.set(scl, scl, scl);
         }
         d.crystal.position.y += flash * 0.08;
+        d.crystal.rotation.y += flash * 0.3; // discharge torque — twists, springs back as aim retakes
         // Base stays anchored — no rocking/sinking on fire
       } else {
         if (d.crystalParts) {
@@ -8630,6 +10139,17 @@ function updateDefenders(dt, t) {
         d.armAnim -= dt * 3;
         if (d.armAnim < 0) d.armAnim = 0;
         d.armGroup.rotation.x = d.armAnim * Math.PI;
+        // Heavy chassis rock — front lifts on release, settles as the arm resets
+        const kick = Math.sin((1 - d.armAnim) * Math.PI); // bell 0→1→0 over the throw
+        d.group.rotation.x = -kick * 0.05;
+        // Counterweight follow-through — decaying pendulum wobble, dies to exact rest
+        const cwWob = Math.sin((1 - d.armAnim) * Math.PI * 3) * 0.22 * d.armAnim;
+        if (d.cw)      d.cw.rotation.x = cwWob;
+        if (d.cwChain) d.cwChain.rotation.x = cwWob;
+      } else if (d.group.rotation.x !== 0) {
+        d.group.rotation.x = 0; // settle chassis exactly level
+        if (d.cw)      d.cw.rotation.x = 0;
+        if (d.cwChain) d.cwChain.rotation.x = 0;
       }
     } else if (d.type === 'wall' && d.wallArmGroup && (d.armAnim || 0) > 0) {
       d.armAnim -= dt * 3;
@@ -8654,16 +10174,23 @@ function updateDefenders(dt, t) {
       if (d.orbBase) d.orbBase.scale.setScalar(orbIdle);
       if (d.orbTip)  d.orbTip.scale.setScalar(orbIdle);
       if (d.hatTip)  d.hatTip.scale.setScalar(1 + Math.sin(d.idleTime * 1.6 + 1.1) * 0.08);
+      if (d.orbTip)  d.orbTip.position.y = 0.27 + Math.sin(d.idleTime * 2.1) * 0.025; // orb tip hovers loose off the staff
       if ((d.castPhase || 0) > 0) {
         d.castPhase = Math.max(0, d.castPhase - dt * 2.5);
         const cp = Math.sin(d.castPhase * Math.PI);
-        if (d.armR) { d.armR.rotation.x = -0.65 * cp; d.armR.rotation.z = -0.20 * cp - sway * 0.04; }
+        // Anticipation → release: staff cocks back with a knee dip, then sweeps up
+        const wind = Math.sin(Math.max(0, (d.castPhase - 0.62) / 0.38) * Math.PI); // pre-release bell
+        const cpR  = Math.sin(Math.min(d.castPhase, 0.62) / 0.62 * Math.PI);       // release bell
+        d.group.position.y -= wind * 0.05;             // dip into the cast
+        d.group.rotation.x = cpR * 0.05 - wind * 0.06; // coil back, lean into release
+        if (d.armR) { d.armR.rotation.x = 0.40 * wind - 0.65 * cpR; d.armR.rotation.z = -0.20 * cpR - sway * 0.04; }
         // Surge the orb on cast
         const orbPulse = orbIdle + cp * 0.55;
         if (d.orbBase) d.orbBase.scale.setScalar(orbPulse);
         if (d.orbTip)  d.orbTip.scale.setScalar(orbPulse);
         if (d.hatTip)  d.hatTip.scale.setScalar(1 + cp * 0.35);
       } else {
+        d.group.rotation.x = 0; // settle upright — no residual cast lean
         if (d.armR) { d.armR.rotation.x = 0.12 - breath * 0.08; d.armR.rotation.z = -sway * 0.04; }
       }
     }
@@ -8691,11 +10218,19 @@ function updateDefenders(dt, t) {
         const flex = snap * 0.28;
         if (d.bowL) d.bowL.rotation.y = -flex;
         if (d.bowR) d.bowR.rotation.y =  flex;
+        // Carriage kicks rearward along the aim line, springs back to rest
+        const bry = d.pivot.rotation.y;
+        d.pivot.position.x = -Math.sin(bry) * snap * 0.09;
+        d.pivot.position.z = -Math.cos(bry) * snap * 0.09;
+        // Crank wheel whips a full re-wind turn as the shot settles (2π ≡ rest pose)
+        if (d.wheel) d.wheel.rotation.y = rel * Math.PI * 2;
       } else {
         // Settle on idle
         if (d.string && d.string.position.z !== 0.20) d.string.position.z = 0.20;
         if (d.bowL && d.bowL.rotation.y !== 0) d.bowL.rotation.y = 0;
         if (d.bowR && d.bowR.rotation.y !== 0) d.bowR.rotation.y = 0;
+        if (d.pivot.position.x !== 0 || d.pivot.position.z !== 0) { d.pivot.position.x = 0; d.pivot.position.z = 0; }
+        if (d.wheel && d.wheel.rotation.y !== 0) d.wheel.rotation.y = 0;
       }
     }
 
@@ -8817,11 +10352,17 @@ function updateDefenders(dt, t) {
       if (closest.alive) {
         if (closest.fightingDefender &&
             (closest.fightingDefender.type === 'tower' || closest.fightingDefender.type === 'catapult')) {
-          releaseAttackSlot(closest.fightingDefender, closest);
-          closest.attackSlot       = acquireAttackSlot(d, closest);
-          closest.fightingDefender = d;
-          closest.chasingDefender  = null;
-          closest.defAttackTimer   = 0;
+          // Gated for the same reason as the other two override paths — a full
+          // defender must not accept another attacker, and the old slot is only
+          // given up once the new one is secured.
+          const _ovSlot2 = acquireAttackSlot(d, closest);
+          if (_ovSlot2 >= 0) {
+            releaseAttackSlot(closest.fightingDefender, closest);
+            closest.attackSlot       = _ovSlot2;
+            closest.fightingDefender = d;
+            closest.chasingDefender  = null;
+            closest.defAttackTimer   = 0;
+          }
         } else if (!closest.fightingDefender) {
           closest.chasingDefender = null; // dealDamage set fightingDefender; clear stale chase
         }
@@ -8905,10 +10446,22 @@ function findClosestOrc(pos, range) {
 // ─────────────────────────────────────────────
 //  VFX
 // ─────────────────────────────────────────────
+// Hit-particle materials are cached per color: particles only ever scale-shrink (no
+// per-particle opacity animation), so one material per hex serves every burst of that
+// color. Kills the alloc/dispose churn of 9-13 fresh materials per hit. The cache is
+// bounded by the game's palette (~25 distinct effect colors).
+const _particleMatCache = new Map();
+function _particleMat(color) {
+  const hex = color || 0x00d4ff;
+  let mat = _particleMatCache.get(hex);
+  if (!mat) { mat = new THREE.MeshBasicMaterial({ color: hex }); _particleMatCache.set(hex, mat); }
+  return mat;
+}
 function spawnHitParticles(pos, color, count) {
   count = count ?? (9 + Math.floor(Math.random() * 5));
+  const mat = _particleMat(color);
   for (let i = 0; i < count; i++) {
-    const pMesh = new THREE.Mesh(GEO.particle, new THREE.MeshBasicMaterial({ color: color || 0x00d4ff }));
+    const pMesh = new THREE.Mesh(GEO.particle, mat);
     pMesh.position.copy(pos);
     scene.add(pMesh);
     const vel = new THREE.Vector3(
@@ -8916,7 +10469,7 @@ function spawnHitParticles(pos, color, count) {
       Math.random() * 5.5 + 1.5,
       (Math.random() - 0.5) * 6
     );
-    vfx.push({ mesh: pMesh, vel, life: 0.65, maxLife: 0.65, isParticle: true });
+    vfx.push({ mesh: pMesh, vel, life: 0.65, maxLife: 0.65, isParticle: true, _sharedMat: true });
   }
 }
 
@@ -9026,10 +10579,11 @@ function updateVFX(dt) {
     const p = vfx[i];
     p.life -= dt;
     if (p.life <= 0) {
-      // Always own materials (created fresh per VFX). Geometry is owned for rings/debris/crumble
-      // but SHARED for hit particles (GEO.particle), so only dispose when _ownsGeo is set.
+      // Rings/debris own their materials (they animate opacity per-instance); hit particles
+      // share one cached material per color (_sharedMat) — never dispose those. Geometry is
+      // owned for rings/debris/crumble but SHARED for hit particles (GEO.particle).
       if (p._ownsGeo && p.mesh.geometry) p.mesh.geometry.dispose();
-      if (p.mesh.material) p.mesh.material.dispose();
+      if (!p._sharedMat && p.mesh.material) p.mesh.material.dispose();
       scene.remove(p.mesh);
       vfx.splice(i, 1);
       continue;
@@ -9239,11 +10793,31 @@ function checkWaveEnd() {
   }
   SND.waveComplete();
 
+  // Surviving Last Stand. The countdown's only exit was triggerGameOver() when it hit
+  // zero — nothing anywhere cancelled it — so clearing the wave did NOT save you: the
+  // banner promised "30 seconds, defenders deal 3× damage!" and then killed you at t=30
+  // regardless. It was an unwinnable timer dressed up as a comeback mechanic.
+  //
+  // Holding the line to the end of the wave now IS the win condition. The castle is
+  // pulled off 1 HP to a quarter of maximum — enough to keep playing, still a real
+  // wound, and never a downgrade if some other effect already healed past it.
+  if (lastStandActive) {
+    lastStandActive = false;
+    lastStandTimer  = 0;
+    elLastStand?.classList.remove('active');
+    elLastStandTimer?.classList.remove('active');
+    castleHp = Math.max(castleHp, Math.round(CFG.CASTLE_MAX_HP * 0.25));
+    updateCastleHPBar();
+    updateCastleHPMesh();
+    triggerShake(0.8);
+    showTooltip('🛡️ LAST STAND HELD! The castle endures — walls partly restored', 4200);
+  }
+
   // Feature 3: star rating — 3 independent criteria
   const starNoDmg   = castleHp >= waveStartHp;                               // castle took 0 damage
   const starNoLoss  = waveDefDeaths === 0;                                    // no defenders lost
   const timeLimit   = (20 + wave * 10) * (wave % 5 === 0 ? 1.4 : 1.0);      // seconds; siege waves get +40%
-  const starFast    = (Date.now() - waveStartTime) / 1000 <= timeLimit;      // cleared in time
+  const starFast    = (_simClockMs - waveStartTime) / 1000 <= timeLimit;     // cleared in time (simulated seconds)
   const waveStars   = (starNoDmg ? 1 : 0) + (starNoLoss ? 1 : 0) + (starFast ? 1 : 0);
   totalStars += waveStars;
   // Track per-wave performance for this level — used to compute the level's overall star rating
@@ -9279,8 +10853,15 @@ function checkWaveEnd() {
       // Every 10 waves: big bonus + bump max-defenders cap
       const milestoneGold = 200;
       gold += milestoneGold;
-      CFG.MAX_DEFENDERS = Math.min(40, (CFG.MAX_DEFENDERS || 14) + 1);
+      // This used to bump CFG.MAX_DEFENDERS, which did nothing: getMaxDefenders()
+      // clamps to a hard 26, and that clamp already binds from wave 12 — four waves
+      // before endless even starts. min(26, 14+20) and min(26, 15+20) are both 26, so
+      // the banner promised a slot every 10 waves and never once delivered one.
+      // Milestone slots are counted separately and RAISE the ceiling, which is the
+      // only way the reward can take effect.
+      endlessBonusSlots++;
       showTooltip(`🏆 WAVE ${wave} MILESTONE!  +${milestoneGold}🟡  +1 max defender`, 3200);
+      updateHUD();   // so the x/y denominator visibly moves — the player's only feedback
     } else if (wave > 0 && wave % 5 === 0) {
       // Every 5 waves: gold reward
       const milestoneGold = 75;
@@ -9396,24 +10977,27 @@ let ghostCol = -1, ghostRow = -1;
 // (refund/penalty) popups bypass the merge so the player still sees them clearly.
 let _goldPopupAccum = 0;
 let _goldPopupTimer = 0;
-let _goldPopupLastPos = null;
+let _goldPopupX = 0, _goldPopupY = 0;
 function spawnGoldPopup(amount, worldPos) {
-  if (amount < 0) { _flushGoldPopup(amount, worldPos); return; }
+  // Project to screen coords NOW — worldPos is usually the shared posAbove() vector,
+  // which gets overwritten by other callers long before the 80ms batch flushes.
+  // Batching therefore stores plain screen scalars, never the vector.
+  worldPos.project(camera);
+  const sx = (worldPos.x *  0.5 + 0.5) * window.innerWidth;
+  // Clamp so the popup never floats up into the HUD (68px tall, travels 58px)
+  const sy = Math.max(68 + 58 + 4, (-worldPos.y * 0.5 + 0.5) * window.innerHeight);
+  if (amount < 0) { _emitGoldPopup(amount, sx, sy); return; }   // refunds/penalties show instantly
   _goldPopupAccum += amount;
-  _goldPopupLastPos = worldPos;
+  _goldPopupX = sx; _goldPopupY = sy;
   if (_goldPopupTimer) return;
   _goldPopupTimer = setTimeout(() => {
     _goldPopupTimer = 0;
-    _flushGoldPopup(_goldPopupAccum, _goldPopupLastPos);
+    _emitGoldPopup(_goldPopupAccum, _goldPopupX, _goldPopupY);
     _goldPopupAccum = 0;
-    _goldPopupLastPos = null;
   }, 80); // batch a single frame's worth (~5 frames at 60fps)
 }
-function _flushGoldPopup(amount, worldPos) {
-  if (!worldPos || amount === 0) return;
-  worldPos.project(camera);
-  const x = (worldPos.x *  0.5 + 0.5) * window.innerWidth;
-  const y = Math.max(68 + 58 + 4, (-worldPos.y * 0.5 + 0.5) * window.innerHeight);
+function _emitGoldPopup(amount, x, y) {
+  if (amount === 0) return;
   const el = document.createElement('div');
   el.className = 'gold-popup';
   el.textContent = amount < 0 ? `${amount}🟡` : `+${amount}🟡`;
@@ -9447,12 +11031,17 @@ function spawnDmgPopup(amount, worldPos) {
 function updateGhostPreview() {
   rangeRingMesh.visible = false;
   raycaster.setFromCamera(mouseNDC, camera);
-  const hits = raycaster.intersectObjects(tileMeshesArr);
+  // Ground-plane intersect → tile col/row. Tile meshes are merged/invisible now, so we
+  // derive the hovered tile from the flat ground plane — the exact method the placement
+  // click already uses (_rayToTile), guaranteeing hover and placement agree.
+  const _gp = raycaster.ray.intersectPlane(_groundPlane, _tmpV3a);
+  const col = _gp ? Math.round(_tmpV3a.x) : -1;
+  const row = _gp ? Math.round(_tmpV3a.z) : -1;
+  const inBounds = _gp && col >= 0 && col < CFG.GRID_W && row >= 0 && row < CFG.GRID_H;
 
   // Enemy placement ghost — orange preview on any non-castle tile
   if (selectedEnemyType) {
-    if (hits.length === 0) { ghostMesh.visible = false; return; }
-    const { col, row } = hits[0].object.userData;
+    if (!inBounds) { ghostMesh.visible = false; return; }
     const cell = grid[`${col},${row}`];
     if (!cell || cell.type === 'castle') { ghostMesh.visible = false; return; }
     ghostMesh.material = M.ghostEnemy;
@@ -9464,8 +11053,7 @@ function updateGhostPreview() {
   if (!selectedTool) {
     ghostMesh.visible = false;
     // Hover over an existing defender → show its range ring
-    if (hits.length > 0) {
-      const { col, row } = hits[0].object.userData;
+    if (inBounds) {
       const def = defenders.find(d => d.col === col && d.row === row && d.alive);
       if (def) {
         const range = def.range ?? CFG.STATS[def.type]?.range;
@@ -9479,8 +11067,7 @@ function updateGhostPreview() {
     return;
   }
 
-  if (hits.length === 0) { ghostMesh.visible = false; return; }
-  const { col, row } = hits[0].object.userData;
+  if (!inBounds) { ghostMesh.visible = false; return; }
   ghostCol = col; ghostRow = row;
   const key = `${col},${row}`;
   const cell = grid[key];
@@ -9525,8 +11112,13 @@ const elGameOver  = document.getElementById('game-over');
 const elGoStats   = document.getElementById('go-stats');
 const elBtnStart  = document.getElementById('btn-start');
 
+// Slots granted by endless wave-milestones. Kept out of CFG.MAX_DEFENDERS on purpose:
+// that value is only ever read through the clamp below, so adding to it could never
+// lift the ceiling. Adding here does. Campaign play never awards these (milestones are
+// endless-only), so the normal 26 cap is unchanged.
+let endlessBonusSlots = 0;
 function getMaxDefenders() {
-  return Math.min(26, CFG.MAX_DEFENDERS + wave);
+  return Math.min(26 + endlessBonusSlots, CFG.MAX_DEFENDERS + wave);
 }
 
 function liveDefenderCount() {
@@ -9559,8 +11151,16 @@ function updateHUD() {
   }
   // Grey out cards whose unitCost exceeds remaining slots
   _buildCards.forEach(card => {
-    const cost = CFG.STATS[card.dataset.tool]?.unitCost ?? 1;
-    card.classList.toggle('cap-blocked', cost > free);
+    const tool = card.dataset.tool;
+    const cost = CFG.STATS[tool]?.unitCost ?? 1;
+    const blocked = cost > free;
+    card.classList.toggle('cap-blocked', blocked);
+    // Slot cost was never surfaced anywhere in the UI — cards show only gold, so a
+    // knight silently ate 3 of the unit cap and the player's only clue was the card
+    // greying out with no stated reason. Put both costs, and the reason, on the card.
+    const gold = CFG.COSTS[tool];
+    card.title = `${_BUILD_NAMES?.[tool] ?? tool} — ${gold}🟡, ${cost} unit slot${cost === 1 ? '' : 's'}`
+      + (blocked ? `  ·  not enough free slots (${free} left)` : '');
   });
   // Affordability visual: grey out cards the player can't afford right now
   if (typeof refreshBuildCardStates === 'function') refreshBuildCardStates();
@@ -9839,18 +11439,12 @@ document.getElementById('btn-merchant-skip').addEventListener('click', () => {
 
 // Feature 2: persistent high score
 function saveHighScore() {
-  // Guard JSON.parse — a corrupted save shouldn't crash the game-over flow.
-  let prev = null;
-  try {
-    const raw = localStorage.getItem('tdHighScore');
-    if (raw) prev = JSON.parse(raw);
-  } catch (err) {
-    console.warn('tdHighScore corrupted, resetting:', err);
-  }
+  // Goes through loadSave/saveSave rather than hand-stamping schemaVersion and
+  // hand-guarding JSON.parse — same stored shape, but the key now actually sits
+  // on the migration path it's registered for.
+  const prev = loadSave('tdHighScore', null);
   const isNew = !prev || wave > prev.wave || (wave === prev.wave && kills > prev.kills);
-  if (isNew) {
-    try { localStorage.setItem('tdHighScore', JSON.stringify({ wave, kills, schemaVersion: 1 })); } catch {}
-  }
+  if (isNew) saveSave('tdHighScore', { wave, kills });
   return { isNew, prev };
 }
 
@@ -9956,11 +11550,16 @@ function recordLevelResult(id, stars) {
   cur.unlocked  = true;
 
   // Track best clear time per difficulty (only if completed with ≥1 star)
-  if (stars >= 1 && _levelRunStartMs) {
+  if (stars >= 1 && _levelRunActive) {
     const elapsed = _levelElapsedMs();
     cur.bestTimes = cur.bestTimes || {};
-    const prevTime = cur.bestTimes[currentDifficulty];
-    if (!prevTime || elapsed < prevTime) cur.bestTimes[currentDifficulty] = elapsed;
+    // File under the difficulty the run was STARTED on, not whatever is set when it
+    // ends. Difficulty is switchable mid-run from the ESC menu, so reading the live
+    // value let a run played on Hard be recorded as an Easy best time (or vice versa)
+    // by flipping the setting on the final wave.
+    const diffKey = _levelRunDifficulty || currentDifficulty;
+    const prevTime = cur.bestTimes[diffKey];
+    if (!prevTime || elapsed < prevTime) cur.bestTimes[diffKey] = elapsed;
   }
 
   levelProgress[key] = cur;
@@ -9998,6 +11597,7 @@ function _resetRunState() {
   lastStandTimer = 0;
   // Reset endless milestone-granted defender slots so the next run starts fresh
   CFG.MAX_DEFENDERS = 14;
+  endlessBonusSlots = 0;   // milestone-granted slots are per-run, like the base cap
   spawnQueue.length = 0;
   spawnTimer = 0;
   // Cancel any pending Level Complete modal from a previous run
@@ -10021,7 +11621,9 @@ function startLevel(id) {
   if (!lvl) return;
   if (!isLevelUnlocked(id)) return;
   applyDifficulty();                    // ensure difficultyMult + music mood reflect the current pick
-  _levelRunStartMs = Date.now();        // start clock for "best time"
+  _levelRunStartMs = _simClockMs;       // start clock for "best time" (simulated, not wall)
+  _levelRunActive  = true;
+  _levelRunDifficulty = currentDifficulty;
   currentLevel = lvl;
   hideLevelSelect();
   _resetRunState();
@@ -10044,7 +11646,25 @@ function startLevel(id) {
   showTooltip(`Level ${lvl.id === 'endless' ? '∞' : lvl.id}: ${lvl.name}  •  ${diffLabel}`, 2600);
 }
 
+// Remembered so a window resize can rebuild the map at the new tile grid
+// (the terrain is rasterised to whole tiles, so it can't just stretch).
+let _lsLastOpts = {};
+// Run state captured when the player is only BROWSING the level select (i.e. a
+// Close button is on offer). Restored by the ls-close handler.
+let _lsRunSnapshot = null;
 function showLevelSelect(opts = {}) {
+  _lsLastOpts = opts;
+  // opts.showClose means "the run is preserved until the player picks a new level".
+  // It wasn't: this function clears currentLevel and waveActive unconditionally and
+  // nothing put them back, so Close — the button that exists specifically to keep
+  // the run — orphaned it instead. waveActive=false makes checkWaveEnd() bail at its
+  // first line, so the Start Wave button disabled at wave launch was never re-enabled
+  // (and Enter is gated on the same flag) => hard soft-lock, reload the only way out.
+  // currentLevel=null additionally made the level impossible to complete and let the
+  // endless branch re-run applyLayout(), wiping the player's placed defenders.
+  _lsRunSnapshot = opts.showClose
+    ? { currentLevel, waveActive, gameSpeed, startDisabled: elBtnStart ? elBtnStart.disabled : false }
+    : null;
   currentLevel = null;
   waveActive = false;
   gameSpeed = 0;
@@ -10061,53 +11681,491 @@ function showLevelSelect(opts = {}) {
   if (map) {
     map.innerHTML = '';
 
+    // ── Fixed-aspect artboard ────────────────────────────────────────────────
+    // The grid used to be sized from the container, so the WORLD reflowed with the
+    // window: a tall window produced a compact continent ringed by sea, a wide one
+    // squashed the same continent edge-to-edge with the sea nearly gone. Tiles were
+    // square either way (that was fixed separately), but the map had no stable
+    // format — every window shape drew a differently-proportioned world.
+    //
+    // Now the world is a CONSTANT 40×25 artboard. We compute the largest 40:25 box
+    // that fits the container and letterbox it, so the map always has the same
+    // composition and simply scales. Everything in world space (terrain, nodes,
+    // compass, sea note, clouds) goes into this stage, so the %-positioned nodes
+    // stay locked to the terrain. Chrome (frame, banner, records, difficulty bar)
+    // stays on the container and still spans the full panel.
+    const ART_COLS = 40, ART_ROWS = 25;
+    const stage = document.createElement('div');
+    stage.className = 'ls-stage';
+    {
+      const boxW = map.clientWidth  || window.innerWidth  || 1280;
+      const boxH = map.clientHeight || window.innerHeight || 720;
+      const scale = Math.min(boxW / ART_COLS, boxH / ART_ROWS);
+      const w = Math.round(ART_COLS * scale), h = Math.round(ART_ROWS * scale);
+      stage.style.width  = w + 'px';
+      stage.style.height = h + 'px';
+      stage.style.left   = Math.round((boxW - w) / 2) + 'px';
+      stage.style.top    = Math.round((boxH - h) / 2) + 'px';
+    }
+    map.appendChild(stage);
+
     // Node positions on the winding path (% of container width/height)
     const positions = [
-      { x: 14, y: 74 },   // L1 – meadow (bottom-left) – home castle
-      { x: 32, y: 34 },   // L2 – desert (upper-left)
-      { x: 50, y: 60 },   // L3 – icelands (middle)
+      { x: 14, y: 68 },   // L1 – meadow (lower-left) – home castle
+      { x: 32, y: 32 },   // L2 – desert (upper-left)
+      { x: 50, y: 58 },   // L3 – icelands (middle)
       { x: 70, y: 28 },   // L4 – lava (upper-right)
-      { x: 88, y: 58 },   // L5 – abyss (bottom-right)
+      { x: 88, y: 56 },   // L5 – abyss (right)
     ];
 
-    // Figure out the next recommended level (first unlocked + not fully 3-starred)
+    // Next recommended level: prefer the first unlocked UNBEATEN realm (the natural
+    // "continue the journey" target); only if everything unlocked is beaten, point at
+    // the first realm that isn't fully 3-starred (perfection chase).
     let nextId = null;
     for (const L of LEVELS) {
       const p = levelProgress[String(L.id)];
-      if (isLevelUnlocked(L.id) && (!p || (p.bestStars || 0) < LEVEL_MAX_STARS)) { nextId = L.id; break; }
+      if (isLevelUnlocked(L.id) && !p?.completed) { nextId = L.id; break; }
+    }
+    if (nextId === null) {
+      for (const L of LEVELS) {
+        const p = levelProgress[String(L.id)];
+        if (isLevelUnlocked(L.id) && (!p || (p.bestStars || 0) < LEVEL_MAX_STARS)) { nextId = L.id; break; }
+      }
     }
 
-    // ── ROADMAP PATH: one smooth spline threading the five nodes ──
-    // viewBox 0..100 with preserveAspectRatio:none so node %-positions line up exactly.
+    // ── BLOCKY WORLD MAP ────────────────────────────────────────────────
+    // The chart is one SVG of 1×1 tiles so it reads as voxel art rather than
+    // vector UI: a landmass that marches west→east through the five realms,
+    // ringed by open sea, with a cobbled road linking them. The grid is sized
+    // from the container so tiles come out square, and preserveAspectRatio
+    // "none" keeps tile space in exact agreement with the %-positioned nodes.
     const NS = 'http://www.w3.org/2000/svg';
-    const pathSvg = document.createElementNS(NS, 'svg');
-    pathSvg.setAttribute('class', 'ls-path-svg');
-    pathSvg.setAttribute('viewBox', '0 0 100 100');
-    pathSvg.setAttribute('preserveAspectRatio', 'none');
-    // Catmull-Rom → cubic Bézier for a soft, natural curve through the points.
-    const _spline = (pts) => {
-      if (pts.length < 2) return '';
-      let d = `M ${pts[0].x} ${pts[0].y}`;
-      for (let i = 0; i < pts.length - 1; i++) {
-        const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
-        const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
-        const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
-        d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
-      }
-      return d;
-    };
-    const _dPath = _spline(positions);
-    const track = document.createElementNS(NS, 'path');
-    track.setAttribute('d', _dPath); track.setAttribute('class', 'ls-track');
-    pathSvg.appendChild(track);
-    const dash = document.createElementNS(NS, 'path');
-    dash.setAttribute('d', _dPath); dash.setAttribute('class', 'ls-stripe');
-    pathSvg.appendChild(dash);
-    map.appendChild(pathSvg);
+    // Constant grid — the artboard IS the world. The stage above is already sized to
+    // this exact aspect, so preserveAspectRatio="none" fills it without distorting:
+    // tiles stay square because 40/25 matches the stage's own 40:25 box.
+    const cols = ART_COLS, rows = ART_ROWS;
 
-    // ── Draw level nodes (clean circular biome medallions) ──
-    // Per-biome medallion ring colour (matches each realm's theme)
-    const _ringColors = ['#6cc24a', '#e0a83a', '#5ab4e0', '#e0542a', '#a85ad8'];
+    // Deterministic per-tile noise — the realm looks identical every visit.
+    const rnd = (x, y, s = 0) => {
+      let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 2246822519)) >>> 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+      return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    };
+
+    // Flat voxel palettes, west → east, plus the shore tint where each meets water.
+    const BIOMES = [
+      { fill: ['#4b9a37', '#57a942', '#3f8a2d', '#62b64c'], shore: '#d9c078', deco: ['tree', 'tree', 'pine', 'rock'] },
+      { fill: ['#d6ae63', '#e2bd75', '#c6974b', '#ecca85'], shore: '#efdca6', deco: ['cactus', 'rock', 'cactus', 'dune'] },
+      { fill: ['#bed2e6', '#cfe0f0', '#a9c1d8', '#dcebf7'], shore: '#dfeaf6', deco: ['pine', 'ice', 'ice', 'rock'] },
+      { fill: ['#5a3128', '#6b3a2c', '#48251f', '#7a4632'], shore: '#3a221c', deco: ['volcano', 'lava', 'rock', 'lava'] },
+      { fill: ['#3a2352', '#472b63', '#2d1a41', '#553578'], shore: '#241439', deco: ['skull', 'crystal', 'crystal', 'rock'] },
+    ];
+    const SEA = ['#17386b', '#1c4179', '#143363'];
+
+    // Pixel sprites: a character grid + colour key, expanded to flat rects.
+    const ART = {
+      tree:    { p: { G: '#3f8f2c', L: '#57ab3f', T: '#5b3a1e' },
+                 r: ['..GG..', '.GLLG.', 'GLLLLG', '.GLLG.', '..TT..', '..TT..'] },
+      pine:    { p: { G: '#2e6b3a', L: '#3d8a4b', T: '#4a3018' },
+                 r: ['..GG..', '.GLLG.', '.GLLG.', 'GLLLLG', '..TT..', '..TT..'] },
+      cactus:  { p: { C: '#3f8f52', D: '#2e6b3c' },
+                 r: ['..CC..', 'C.CC..', 'CDCC.C', 'CCCCDC', '..CCC.', '..CD..'] },
+      rock:    { p: { R: '#7b7466', D: '#565044' },
+                 r: ['..RR..', '.RRRR.', 'RRRRRD', 'DRRDDD'] },
+      dune:    { p: { S: '#e6c98a', D: '#c9a45f' },
+                 r: ['..SS..', '.SSSSS', 'SSDDSS'] },
+      ice:     { p: { I: '#bfe4ff', W: '#ffffff', D: '#7fb6dd' },
+                 r: ['..W..', '.IWI.', 'IIWII', '.IDI.', '..D..'] },
+      volcano: { p: { K: '#3c211b', R: '#5c332a', L: '#ff7a1e', Y: '#ffc44d' },
+                 r: ['..YY..', '.LKKL.', '.KRRK.', 'KRRRRK', 'KRRRRK', 'KKKKKK'] },
+      lava:    { p: { L: '#ff6a12', Y: '#ffb43a', K: '#3c211b' },
+                 r: ['.KKK.', 'KLYLK', 'KYLYK', '.KKK.'] },
+      skull:   { p: { S: '#cfc6b8', K: '#241533', D: '#9c917f' },
+                 r: ['.SSSS.', 'SSSSSS', 'SKSSKS', 'SSSSSS', '.SKKS.', '..DD..'] },
+      crystal: { p: { C: '#a86ce0', W: '#e0c2ff', D: '#6e3fa8' },
+                 r: ['..W..', '.CWC.', '.CWC.', 'CCWCC', '.DDD.'] },
+      castle:  { p: { S: '#b9b2a4', D: '#8a8375', F: '#d8433a' },
+                 r: ['S.S.S.S', 'SSSSSSS', 'SDSSSDS', 'SSSSSSS', 'SSDDDSS', 'SSDDDSS'] },
+      cloud:   { p: { W: '#ffffff' },
+                 r: ['.WWW..', 'WWWWWW', '.WWWW.'] },
+      mountain:{ p: { M: '#6f6a5e', D: '#514c43', W: '#e8f0f8' },
+                 r: ['...W...', '..WWD..', '.MMMDD.', 'MMMMMDD'] },
+      // Each realm gets its own stronghold silhouette, so the markers read as
+      // five different places rather than one icon in five colours.
+      keep:    { p: { S: '#cbc4b4', D: '#7d7668', F: '#c8402f', T: '#5b4a30' },
+                 r: ['....F....', '....T....', 'S.S.S.S.S', 'SSSSSSSSS', 'SSDSSSDSS', 'SSSSSSSSS', 'SSSDDDSSS'] },
+      outpost: { p: { S: '#e2c685', D: '#a8823f', F: '#2f7fb8', T: '#6b5228' },
+                 r: ['....F....', '....T....', '...SSS...', '...SDS...', '..SSSSS..', '.SSSDSSS.', 'SSSSSSSSS'] },
+      citadel: { p: { I: '#dff0ff', C: '#a8d4f0', W: '#3f6b8f' },
+                 r: ['..C...C..', '..I...I..', '..I.C.I..', '.CIICIIC.', '.IIWIIWI.', '.IIIIIII.', 'CIIIIIIIC'] },
+      fortress:{ p: { K: '#2e211d', L: '#ff7a1e' },
+                 r: ['.K.K.K.K.', '.KKKKKKK.', '.KKLKLKK.', '.KKKKKKK.', 'KKKLLLKKK', 'KKKKKKKKK', 'KLKKKKKLK'] },
+      gate:    { p: { P: '#8b5fc4', V: '#e0b8ff' },
+                 r: ['..PPPPP..', '.PP...PP.', '.P.VVV.P.', '.P.VVV.P.', '.P.VVV.P.', '.PP...PP.', 'PPPPPPPPP'] },
+      lock:    { p: { M: '#aeb6c4', D: '#e3e8f0', B: '#8b93a3', K: '#2a2f38' },
+                 r: ['..MM..', '.M..M.', '.M..M.', 'DDDDDD', 'DDKKDD', 'DBKKBD', 'DBBBBD'] },
+    };
+    // px = size of one sprite pixel in tile units
+    const spriteRects = (a, ox, oy, px) => {
+      let s = '';
+      for (let ry = 0; ry < a.r.length; ry++) {
+        const row = a.r[ry];
+        for (let rx = 0; rx < row.length; rx++) {
+          const c = a.p[row[rx]];
+          if (!c) continue;
+          s += `<rect x="${(ox + rx * px).toFixed(3)}" y="${(oy + ry * px).toFixed(3)}" width="${px.toFixed(3)}" height="${px.toFixed(3)}" fill="${c}"/>`;
+        }
+      }
+      return s;
+    };
+    const spriteSvg = (a, cls) => {
+      const w = a.r[0].length, h = a.r.length;
+      return `<svg class="${cls}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">${spriteRects(a, 0, 0, 1)}</svg>`;
+    };
+
+    // Smooth value noise — gives coasts and realm borders an organic wobble
+    // instead of the ruler-straight bands a simple x-split would produce.
+    const vnoise = (x, y, s) => {
+      const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+      const sx = xf * xf * (3 - 2 * xf), sy = yf * yf * (3 - 2 * yf);
+      const a = rnd(xi, yi, s), b = rnd(xi + 1, yi, s), c = rnd(xi, yi + 1, s), d = rnd(xi + 1, yi + 1, s);
+      return (a * (1 - sx) + b * sx) * (1 - sy) + (c * (1 - sx) + d * sx) * sy;
+    };
+    const fbm = (x, y, s) =>
+      vnoise(x, y, s) * 0.6 + vnoise(x * 2.1, y * 2.1, s + 11) * 0.27 + vnoise(x * 4.4, y * 4.4, s + 23) * 0.13;
+
+    // Realm centres and the road are needed *before* the coastline, so the
+    // generator can guarantee dry ground beneath them.
+    const nodeTiles = positions.map(p => ({ x: (p.x / 100) * cols, y: (p.y / 100) * rows }));
+    const legTiles = (i) => {
+      const p0 = nodeTiles[i - 1] || nodeTiles[i], p1 = nodeTiles[i];
+      const p2 = nodeTiles[i + 1], p3 = nodeTiles[i + 2] || nodeTiles[i + 1];
+      const out = [];
+      let px = null, py = null;
+      for (let s = 0; s <= 300; s++) {
+        const t = s / 300, t2 = t * t, t3 = t2 * t;
+        const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+        const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+        const tx = Math.floor(x), ty = Math.floor(y);
+        if (tx === px && ty === py) continue;
+        // Split diagonal steps so the cobbles never break apart
+        if (px !== null && tx !== px && ty !== py) out.push({ x: tx, y: py });
+        out.push({ x: tx, y: ty });
+        px = tx; py = ty;
+      }
+      return out;
+    };
+    const inb = (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows;
+    const roadLegs = [];
+    for (let i = 0; i < positions.length - 1; i++) {
+      const destId = LEVELS[i + 1]?.id;
+      roadLegs.push({
+        state: destId === nextId ? 'next' : isLevelUnlocked(destId) ? 'cleared' : 'locked',
+        tiles: legTiles(i).filter(inb),
+      });
+    }
+    // Home keep, west of the first realm, with a spur joining the highway
+    const homeY = Math.min(rows - 3, Math.floor(nodeTiles[0].y) + 2);
+    const homeX = Math.max(2, Math.floor(nodeTiles[0].x) - 5);
+    const spurTiles = [];
+    {
+      const n0x = Math.floor(nodeTiles[0].x), n0y = Math.floor(nodeTiles[0].y);
+      for (let x = Math.min(homeX, n0x); x <= Math.max(homeX, n0x); x++) spurTiles.push({ x, y: homeY });
+      for (let y = Math.min(homeY, n0y); y <= Math.max(homeY, n0y); y++) spurTiles.push({ x: n0x, y });
+    }
+    const roadSet = new Set();
+    for (const leg of roadLegs) for (const t of leg.tiles) roadSet.add(t.x + ',' + t.y);
+    for (const t of spurTiles) roadSet.add(t.x + ',' + t.y);
+
+    // ── The continent: one irregular mass with bays and capes, plus isles ──
+    const solid = [];
+    for (let cy = 0; cy < rows; cy++) {
+      solid[cy] = [];
+      for (let cx = 0; cx < cols; cx++) {
+        const nx = (cx + 0.5) / cols, ny = (cy + 0.5) / rows;
+        const dx = (nx - 0.5) / 0.47, dy = (ny - 0.54) / 0.45;
+        // Big enough to fill the chart; the noise term carves the bays and capes
+        solid[cy][cx] = Math.hypot(dx, dy) < 0.94 + (fbm(nx * 3.2, ny * 3.2, 5) - 0.5) * 0.46;
+      }
+    }
+    // Always keep one tile of open water round the rim so the coast reads
+    for (let cy = 0; cy < rows; cy++) {
+      for (let cx = 0; cx < cols; cx++) {
+        if (cx === 0 || cy === 0 || cx === cols - 1 || cy === rows - 1) solid[cy][cx] = false;
+      }
+    }
+    for (const [ix, iy, ir] of [[0.935, 0.895, 1.1], [0.055, 0.62, 1.0], [0.44, 0.965, 1.1]]) {
+      const tx = ix * cols, ty = iy * rows;
+      for (let cy = 0; cy < rows; cy++) {
+        for (let cx = 0; cx < cols; cx++) {
+          if (Math.hypot(cx + 0.5 - tx, (cy + 0.5 - ty) * 1.25) < ir + (rnd(cx, cy, 31) - 0.5) * 0.8) solid[cy][cx] = true;
+        }
+      }
+    }
+    // Guarantee dry ground under every realm, the highway and the keep
+    const stampLand = (tx, ty, r) => {
+      const R = Math.ceil(r);
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const x = Math.round(tx) + dx, y = Math.round(ty) + dy;
+          if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+          if (Math.hypot(dx, dy) <= r) solid[y][x] = true;
+        }
+      }
+    };
+    nodeTiles.forEach(n => stampLand(n.x, n.y, 3.2));
+    for (const leg of roadLegs) for (const t of leg.tiles) stampLand(t.x, t.y, 1.5);
+    for (const t of spurTiles) stampLand(t.x, t.y, 1.5);
+    stampLand(homeX, homeY, 2.4);
+
+    // ── Realms claim territory around their capital, rather than owning a stripe ──
+    const REALM_PULL = [0.84, 0.94, 1.20, 0.95, 0.86];
+    const land = [];
+    for (let cy = 0; cy < rows; cy++) {
+      land[cy] = [];
+      for (let cx = 0; cx < cols; cx++) {
+        if (!solid[cy][cx]) { land[cy][cx] = -1; continue; }
+        const nx = (cx + 0.5) / cols, ny = (cy + 0.5) / rows;
+        let best = 0, bd = Infinity;
+        for (let i = 0; i < positions.length; i++) {
+          const px = positions[i].x / 100, py = positions[i].y / 100;
+          const warp = (fbm(nx * 2.8 + i * 9.7, ny * 2.8 + i * 4.1, 41 + i) - 0.5) * 0.26;
+          // Weighted so the centre realm can't swallow the southern bulge and
+          // the two end realms get their fair share of the continent.
+          const d = (Math.hypot(nx - px, (ny - py) * 0.82) + warp) * REALM_PULL[i];
+          if (d < bd) { bd = d; best = i; }
+        }
+        land[cy][cx] = best;
+      }
+    }
+
+    // ── Landmarks: a river to the sea, a lake, a mountain spine, a chasm ──
+    // feat: 0 plain · 1 fresh water · 2 bare rock · 3 chasm
+    const feat = [];
+    for (let cy = 0; cy < rows; cy++) feat[cy] = new Array(cols).fill(0);
+
+    const RIVER = [[0.615, 0.22], [0.545, 0.40], [0.487, 0.55], [0.442, 0.71], [0.398, 0.87], [0.368, 1.03]];
+    for (let s = 0; s <= 460; s++) {
+      const t = (s / 460) * (RIVER.length - 1);
+      const i = Math.min(RIVER.length - 2, Math.floor(t)), f = t - i;
+      const x = (RIVER[i][0] + (RIVER[i + 1][0] - RIVER[i][0]) * f) * cols;
+      const y = (RIVER[i][1] + (RIVER[i + 1][1] - RIVER[i][1]) * f) * rows;
+      const tx = Math.floor(x + (fbm(y * 0.55, 3, 61) - 0.5) * 1.8), ty = Math.floor(y);
+      if (tx < 0 || ty < 0 || tx >= cols || ty >= rows) continue;
+      if (solid[ty][tx]) feat[ty][tx] = 1;
+    }
+    // A lake in the western lowlands
+    for (let cy = 0; cy < rows; cy++) {
+      for (let cx = 0; cx < cols; cx++) {
+        if (!solid[cy][cx]) continue;
+        const dx = (cx + 0.5) / cols - 0.16, dy = ((cy + 0.5) / rows - 0.42) * 1.55;
+        if (Math.hypot(dx, dy) < 0.052 + (rnd(cx, cy, 71) - 0.5) * 0.022) feat[cy][cx] = 1;
+      }
+    }
+    // A mountain spine walling the northern realms off from the centre
+    const ridge = [];
+    for (let s = 0; s <= 160; s++) {
+      const t = s / 160;
+      const tx = Math.floor((0.375 + 0.235 * t + 0.028 * Math.sin(t * 7.2)) * cols);
+      const ty = Math.floor((0.125 + 0.315 * t + 0.022 * Math.cos(t * 5.1)) * rows);
+      if (tx < 0 || ty < 0 || tx >= cols || ty >= rows || !solid[ty][tx]) continue;
+      if (roadSet.has(tx + ',' + ty)) continue;          // the road takes the pass
+      const last = ridge[ridge.length - 1];
+      if (last && last.x === tx && last.y === ty) continue;
+      ridge.push({ x: tx, y: ty });
+      feat[ty][tx] = 2;
+    }
+    // A chasm splitting the Abyss
+    for (let cy = 1; cy < rows - 1; cy++) {
+      const x = Math.round((0.815 + 0.030 * Math.sin(cy * 0.85)) * cols);
+      for (let k = 0; k < 2; k++) {
+        const cx = x + k;
+        if (cx >= 0 && cx < cols && solid[cy][cx] && land[cy][cx] === 4 && !roadSet.has(cx + ',' + cy)) feat[cy][cx] = 3;
+      }
+    }
+
+    const isSea = (x, y) => x < 0 || y < 0 || x >= cols || y >= rows || land[y][x] < 0;
+    const FRESH = ['#2f6ea8', '#3a7fbb', '#2a6197'];
+    const ROCKY = ['#7c7568', '#8d8778', '#6a655a'];
+    const CHASM = ['#150b22', '#1e1030'];
+    const colorAt = (cx, cy) => {
+      const b = land[cy][cx];
+      if (b < 0) return SEA[Math.floor(rnd(cx, cy, 1) * SEA.length)];
+      const f = feat[cy][cx];
+      if (f === 1) return FRESH[Math.floor(rnd(cx, cy, 3) * FRESH.length)];
+      if (f === 2) return ROCKY[Math.floor(rnd(cx, cy, 4) * ROCKY.length)];
+      if (f === 3) return CHASM[Math.floor(rnd(cx, cy, 5) * CHASM.length)];
+      if (isSea(cx - 1, cy) || isSea(cx + 1, cy) || isSea(cx, cy - 1) || isSea(cx, cy + 1)) return BIOMES[b].shore;
+      const p = BIOMES[b].fill;
+      return p[Math.floor(rnd(cx, cy, b + 2) * p.length)];
+    };
+
+    // Terrain, emitted as horizontal runs to keep the node count sane
+    let gTerrain = '';
+    for (let cy = 0; cy < rows; cy++) {
+      let runX = 0, runC = colorAt(0, cy);
+      for (let cx = 1; cx <= cols; cx++) {
+        const c = cx < cols ? colorAt(cx, cy) : null;
+        if (c !== runC) {
+          gTerrain += `<rect x="${runX}" y="${cy}" width="${cx - runX}" height="1" fill="${runC}"/>`;
+          runX = cx; runC = c;
+        }
+      }
+    }
+
+    // Distance out from the shore, for the concentric hatching old charts use
+    const seaDist = [];
+    for (let cy = 0; cy < rows; cy++) seaDist[cy] = new Array(cols).fill(99);
+    let front = [];
+    for (let cy = 0; cy < rows; cy++) {
+      for (let cx = 0; cx < cols; cx++) if (land[cy][cx] >= 0) { seaDist[cy][cx] = 0; front.push([cx, cy]); }
+    }
+    for (let d = 1; d <= 6 && front.length; d++) {
+      const next = [];
+      for (const [x, y] of front) {
+        for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const x2 = x + ox, y2 = y + oy;
+          if (x2 < 0 || y2 < 0 || x2 >= cols || y2 >= rows) continue;
+          if (seaDist[y2][x2] > d) { seaDist[y2][x2] = d; next.push([x2, y2]); }
+        }
+      }
+      front = next;
+    }
+    for (let cy = 0; cy < rows; cy++) {
+      for (let cx = 0; cx < cols; cx++) {
+        if (land[cy][cx] >= 0) continue;
+        const d = seaDist[cy][cx];
+        if (d === 1) {
+          gTerrain += `<rect x="${cx}" y="${cy}" width="1" height="1" fill="rgba(7,18,42,0.34)"/>`;
+          gTerrain += `<rect x="${cx + 0.15}" y="${cy + 0.4}" width="0.7" height="0.14" fill="rgba(206,236,255,0.3)"/>`;
+        } else if (d === 3 || d === 5) {
+          // cartographer's coast hatching
+          const o = d === 3 ? 0.24 : 0.13;
+          gTerrain += `<rect x="${cx + 0.12}" y="${cy + 0.46}" width="0.76" height="0.1" fill="rgba(188,222,255,${o})"/>`;
+        } else if (rnd(cx, cy, 11) > 0.9) {
+          gTerrain += `<rect x="${cx + 0.2}" y="${cy + 0.45}" width="0.42" height="0.12" fill="rgba(190,225,255,0.26)"/>`;
+        }
+      }
+    }
+
+    // ── The road, drawn over the terrain; it bridges wherever it meets water ──
+    const ROAD = {
+      cleared: { base: '#d8b06a', top: '#f4dca6' },
+      next:    { base: '#e6c074', top: '#fff0bd' },
+      locked:  { base: '#9c8a68', top: '#bcaa85' },
+    };
+    const PLANK = { base: '#8a5c2e', top: '#b07c42' };
+    let gRoadHalo = '', gRoad = '';
+    const roadAll = [];
+    const paveTile = (t, col, k, sparkle) => {
+      const bridge = feat[t.y][t.x] === 1;
+      const c = bridge ? PLANK : col;
+      roadAll.push(t);
+      gRoadHalo += `<rect x="${t.x - 0.1}" y="${t.y - 0.1}" width="1.2" height="1.2" fill="rgba(38,26,12,0.45)"/>`;
+      gRoad += `<rect x="${t.x}" y="${t.y}" width="1" height="1" fill="${c.base}"/>`;
+      if (bridge) {
+        // planks across the current, with rails either side
+        for (let p = 0; p < 3; p++) {
+          gRoad += `<rect x="${t.x + 0.08}" y="${(t.y + 0.12 + p * 0.3).toFixed(3)}" width="0.84" height="0.16" fill="${c.top}"/>`;
+        }
+      } else {
+        gRoad += `<rect x="${t.x}" y="${t.y + 0.82}" width="1" height="0.18" fill="rgba(0,0,0,0.20)"/>`;
+        gRoad += `<rect x="${t.x + 0.12}" y="${t.y + 0.14}" width="0.32" height="0.28" fill="${c.top}" opacity="0.7"/>`;
+        gRoad += `<rect x="${t.x + 0.56}" y="${t.y + 0.5}" width="0.28" height="0.26" fill="${c.top}" opacity="0.5"/>`;
+      }
+      if (sparkle) {
+        gRoad += `<rect class="rm-spark" x="${t.x + 0.28}" y="${t.y + 0.28}" width="0.44" height="0.44" fill="#ffeaa8" style="animation-delay:${(k * 0.055).toFixed(2)}s"/>`;
+      }
+    };
+    for (const leg of roadLegs) {
+      leg.tiles.forEach((t, k) => paveTile(t, ROAD[leg.state], k, leg.state === 'next'));
+    }
+    for (const t of spurTiles) if (inb(t)) paveTile(t, ROAD.cleared, 0, false);
+
+    // ── Scenery: woods cluster instead of scattering evenly ──
+    const blocked = new Set();
+    for (const t of roadAll) {
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) blocked.add((t.x + dx) + ',' + (t.y + dy));
+    }
+    for (const n of nodeTiles) {
+      const nx = Math.floor(n.x), ny = Math.floor(n.y);
+      for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) blocked.add((nx + dx) + ',' + (ny + dy));
+    }
+    let gDeco = '';
+    const placeSprite = (a, cx, cy, tall) => {
+      const w = a.r[0].length, h = a.r.length;
+      const px = tall / Math.max(w, h);
+      gDeco += spriteRects(a, cx + 0.5 - (w * px) / 2, cy + 1 - h * px, px);
+    };
+    // Peaks along the spine first, so they read as one range
+    for (const m of ridge) {
+      if (blocked.has(m.x + ',' + m.y)) continue;
+      placeSprite(ART.mountain, m.x, m.y, 1.9 + rnd(m.x, m.y, 81) * 0.5);
+    }
+    // The per-tile scatter of trees / rocks / cacti / skulls / crystals used to run
+    // here. Removed: at map scale those sprites are only a few pixels tall, so they
+    // read as noise rather than detail, and they competed with the five level nodes
+    // — the only things on this screen the player actually needs to find. The
+    // mountain spine above and the home castle below are kept, because those are
+    // real landmarks that orient you rather than texture. Terrain colour and the
+    // shorelines still carry each realm's identity.
+    if (land[homeY] && land[homeY][homeX] >= 0) placeSprite(ART.castle, homeX, homeY, 2.4);
+    const terrain = document.createElementNS(NS, 'svg');
+    terrain.setAttribute('class', 'ls-terrain');
+    terrain.setAttribute('viewBox', `0 0 ${cols} ${rows}`);
+    terrain.setAttribute('preserveAspectRatio', 'none');
+    // A thin parchment wash pulls the five realm palettes into one chart
+    const wash = `<rect x="0" y="0" width="${cols}" height="${rows}" fill="#caa269" opacity="0.1"/>`;
+    terrain.innerHTML = gTerrain + gRoadHalo + gRoad + gDeco + wash;
+    stage.appendChild(terrain);
+
+    // ── Cartographer's flourishes (plain HTML/SVG so nothing gets stretched) ──
+    const compass = document.createElementNS(NS, 'svg');
+    compass.setAttribute('class', 'ls-compass');
+    compass.setAttribute('viewBox', '0 0 24 24');
+    compass.setAttribute('shape-rendering', 'crispEdges');
+    compass.innerHTML = `
+      <g fill="#f0d79a">
+        <rect x="11" y="1"  width="2" height="4"/><rect x="11" y="19" width="2" height="4"/>
+        <rect x="1"  y="11" width="4" height="2"/><rect x="19" y="11" width="4" height="2"/>
+        <rect x="10" y="5"  width="4" height="2"/><rect x="9"  y="7"  width="6" height="2"/>
+        <rect x="5"  y="9"  width="14" height="6"/><rect x="9" y="15" width="6" height="2"/>
+        <rect x="10" y="17" width="4" height="2"/>
+      </g>
+      <g fill="#2a1c0a">
+        <rect x="11" y="9" width="2" height="6"/><rect x="9" y="11" width="6" height="2"/>
+      </g>
+      <g fill="#e0472e"><rect x="11" y="5" width="2" height="6"/></g>`;
+    compass.style.right = '4%';
+    compass.style.top   = '13%';
+    stage.appendChild(compass);
+
+    const seaNote = document.createElement('div');
+    seaNote.className = 'ls-sea-note';
+    seaNote.textContent = 'HIC · SVNT · DRACONES';
+    seaNote.style.left = '7.5%';
+    seaNote.style.top  = '3.4%';
+    stage.appendChild(seaNote);
+
+    // Two slow blocky clouds across the northern sea
+    [{ t: '2.5%', d: 78, delay: -20, w: 54 }, { t: '7.5%', d: 104, delay: -60, w: 38 }].forEach(c => {
+      const cl = document.createElementNS(NS, 'svg');
+      cl.setAttribute('class', 'ls-cloud');
+      cl.setAttribute('viewBox', `0 0 ${ART.cloud.r[0].length} ${ART.cloud.r.length}`);
+      cl.setAttribute('shape-rendering', 'crispEdges');
+      cl.innerHTML = spriteRects(ART.cloud, 0, 0, 1);
+      cl.style.top = c.t;
+      cl.style.width = c.w + 'px';
+      cl.style.animationDuration = c.d + 's';
+      cl.style.animationDelay = c.delay + 's';
+      stage.appendChild(cl);
+    });
+
+    // ── Realm markers ──
+    // Plinth stone + banner colour per realm, and the sprite that names it.
+    const STONE = ['#6f8a52', '#a3854f', '#7f9bb0', '#8a5140', '#5f4a7d'];
+    const RINGS = ['#7ed957', '#f0c05a', '#8fd6ff', '#ff7a3d', '#c98bff'];
+    const ICONS = ['keep', 'outpost', 'citadel', 'fortress', 'gate'];
     LEVELS.forEach((L, i) => {
       const pos = positions[i];
       const unlocked  = isLevelUnlocked(L.id);
@@ -10123,33 +12181,63 @@ function showLevelSelect(opts = {}) {
       node.dataset.biome = String(L.biome);
       node.style.left = pos.x + '%';
       node.style.top  = pos.y + '%';
-      node.style.setProperty('--ring', _ringColors[L.biome] || '#cf8a10');
+      node.style.setProperty('--ring',  RINGS[L.biome] || '#e8b64c');
+      node.style.setProperty('--stone', unlocked ? (STONE[L.biome] || '#6b6f7a') : '#4c505c');
+      node.style.setProperty('--i', i);
+      // A resize rebuild is a refresh, not an entrance — don't re-pop every marker
+      if (opts.noIntro) node.style.animation = 'none';
 
-      const starsHtml = Array.from({length: LEVEL_MAX_STARS}, (_, si) =>
+      const starsHtml = Array.from({ length: LEVEL_MAX_STARS }, (_, si) =>
         `<span class="ls-star${si < stars ? ' earned' : ''}">${si < stars ? '★' : '☆'}</span>`
       ).join('');
 
-      // Best time tag (only shows once the level has been completed at least once on this difficulty)
+      // Best time tag (only once the level has been cleared on this difficulty)
       const bestMs = (levelProgress[String(L.id)]?.bestTimes || {})[currentDifficulty];
       const bestHtml = (unlocked && bestMs)
         ? `<span class="ls-node-best">⏱ ${_formatTimeMs(bestMs)}</span>` : '';
 
       node.innerHTML = `
         <div class="ls-tile">
-          <span class="ls-tile-icon">${unlocked ? (L.icon || '🚩') : '🔒'}</span>
+          ${spriteSvg(ART[unlocked ? ICONS[L.biome] : 'lock'] || ART.rock, 'ls-tile-icon')}
           <span class="ls-node-num">${L.id}</span>
         </div>
         <div class="ls-node-label">
-          <div class="ls-node-name">${unlocked ? L.name : 'Locked'}</div>
+          <div class="ls-node-name">${unlocked ? L.name : 'Sealed'}</div>
           <div class="ls-node-stars">${unlocked ? starsHtml : ''}</div>
           ${bestHtml}
         </div>
       `;
 
       if (unlocked) {
-        node.addEventListener('click', () => { SND.btnClick?.(); startLevel(L.id); });
+        const enter = () => { SND.btnClick?.(); startLevel(L.id); };
+        node.addEventListener('click', enter);
+        // These are plain <div>s, so without this a keyboard-only player could not
+        // start ANY campaign level — the map was mouse-only. Make each unlocked node
+        // a real button: focusable, announced, and activated by Enter or Space.
+        node.tabIndex = 0;
+        node.setAttribute('role', 'button');
+        node.setAttribute('aria-label',
+          `Level ${L.id}: ${L.name}. ${stars} of ${LEVEL_MAX_STARS} stars${completed ? ', completed' : ''}`);
+        node.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') { ev.preventDefault(); enter(); }
+        });
+      } else {
+        // Locked nodes stay out of the tab order but are still announced, so a screen
+        // reader user learns the level exists and is sealed rather than meeting a gap.
+        node.setAttribute('role', 'img');
+        node.setAttribute('aria-label', `Level ${L.id}: sealed`);
       }
-      map.appendChild(node);
+      stage.appendChild(node);
+    });
+
+    // Timber frame + iron corner brackets, laid over the chart
+    const frame = document.createElement('div');
+    frame.className = 'ls-frame';
+    map.appendChild(frame);
+    ['tl', 'tr', 'bl', 'br'].forEach(c => {
+      const k = document.createElement('div');
+      k.className = 'ls-corner ' + c;
+      map.appendChild(k);
     });
 
     // ── Endless button (bottom-right) — shows per-difficulty personal best ──
@@ -10511,7 +12599,20 @@ function _testWait(ms) {
 function gameLoop() {
   if (!testMode) _gameLoopRafId = requestAnimationFrame(gameLoop);
   else if (_mcTickEnabled) _scheduleTestTick();
-  const dt = Math.min(clock.getDelta(), 0.05) * gameSpeed;
+  const rawDt = Math.min(clock.getDelta(), 0.05);   // unscaled — ambient visuals keep moving while paused
+  const dt = rawDt * gameSpeed;
+  // Simulation clock: advances with the WORLD, not the wall. Scoring used Date.now(),
+  // which disagrees with the sim in both directions — at 2× a wave finished in half
+  // the real seconds (free "swift victory" star, best-times halved), and while paused
+  // the wall clock kept running against a frozen world (star lost, best-time inflated
+  // by however long the ESC menu sat open). Best-times are persisted per difficulty,
+  // so that was corrupting saved records. dt is already clamped, so this tracks
+  // exactly the time the game world actually experienced.
+  _simClockMs += dt * 1000;
+  // Self-heal: if the page loaded in a hidden/zero-sized tab, the renderer initialised at
+  // 0×0 and no resize event ever corrected it (black screen). Fix it the moment we tick
+  // with a real window size.
+  if (canvas.width === 0 && window.innerWidth > 0) _applyRendererSize();
   const t  = clock.elapsedTime;
   gameTime += dt;
 
@@ -10522,6 +12623,7 @@ function gameLoop() {
     updateDefenders(dt, t);
     updateCastleTurrets(dt);
     updateProjectiles(dt);
+    updateTrails(dt);
     updateVFX(dt);
     updateWebZones(dt);
 
@@ -10594,6 +12696,9 @@ function gameLoop() {
       }
     }
 
+    // Ambient world life — clouds drift and air motes float on real time (even paused)
+    updateClouds(rawDt);
+    updateAtmosphere(t);
     M.pathMat.emissiveIntensity = 0.07 + Math.sin(t * 2.5) * 0.04;
     M.waterDeep.emissiveIntensity    = 0.28 + Math.sin(t * 1.7) * 0.12;
     M.waterShallow.emissiveIntensity = 0.18 + Math.sin(t * 1.4 + 0.6) * 0.09;
@@ -10608,8 +12713,15 @@ function gameLoop() {
     // Lantern flicker — emissive material + actual point lights
     const lFlicker = 2.0 + Math.sin(t * 8.3) * 0.3 + Math.sin(t * 14.7) * 0.15;
     M.lanternGlow.emissiveIntensity = lFlicker;
-    const ptFlicker = 0.9 + Math.sin(t * 8.3) * 0.25 + Math.sin(t * 13.1) * 0.12;
-    for (let li = 0; li < lanternLights.length; li++) lanternLights[li].intensity = ptFlicker;
+    // Per-lantern phase offset. Every lamp used to be assigned the same computed
+    // value, so the entire map's flames pulsed in perfect lockstep — the one thing
+    // that instantly reads as fake. Offsetting each by a fixed random phase makes
+    // them flicker independently for free.
+    for (let li = 0; li < lanternLights.length; li++) {
+      const L = lanternLights[li];
+      const p = L.userData.flickerPhase || 0;
+      L.intensity = 0.9 + Math.sin(t * 8.3 + p) * 0.25 + Math.sin(t * 13.1 + p * 1.7) * 0.12;
+    }
   }
 
   updateGhostPreview();
@@ -10837,7 +12949,11 @@ function selectBuildTool(tool, opts = {}) {
   if (card) card.classList.add('selected');
   if (!opts.silent) {
     const cost = CFG.COSTS[tool];
-    showTooltip(`${_BUILD_NAMES[tool]} — ${cost}🟡 — click a tile to place`, 2200);
+    // Mention the slot cost for anything that eats more than one — that is the cost
+    // the player can't see anywhere else, and the one that silently blocks later builds.
+    const _slots = CFG.STATS[tool]?.unitCost ?? 1;
+    const _slotTag = _slots > 1 ? ` · ${_slots} slots` : '';
+    showTooltip(`${_BUILD_NAMES[tool]} — ${cost}🟡${_slotTag} — click a tile to place`, 2200);
   }
 }
 
@@ -10869,7 +12985,17 @@ document.addEventListener('mousedown', e => {
 }, { capture: true, passive: true });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'b' || e.key === 'B') { if (studioMode) exitStudio(); else enterStudio(); return; }
+  // Guard the B toggle specifically — NOT the whole handler. Escape further down must
+  // keep working while a text field is focused (closing a modal, opening the menu), so
+  // an early blanket return here would be wrong.
+  //
+  // Without this, typing a single "b" into the map-name or studio-object-name field
+  // threw the player straight into Studio mid-edit. Every other keyboard handler in the
+  // file already does this check — the gameplay shortcuts and the map-editor hotkeys
+  // both guard on activeElement — so this one line was the odd one out.
+  const _typing = !!document.activeElement &&
+    (/^(INPUT|TEXTAREA|SELECT)$/i.test(document.activeElement.tagName) || document.activeElement.isContentEditable);
+  if (!_typing && (e.key === 'b' || e.key === 'B')) { if (studioMode) exitStudio(); else enterStudio(); return; }
   // ── Studio build-tab keyboard shortcuts ──────────────────────────────────
   if (studioMode && studioTab === 'build') {
     const isInput = document.activeElement?.tagName === 'INPUT';
@@ -11101,6 +13227,26 @@ function sellDefenderAt(col, row) {
   if (def.hpBar) { def.hpBar.bg.visible = false; def.hpBar.fg.visible = false; }
   if (def._rallyMarker) { scene.remove(def._rallyMarker); def._rallyMarker = null; }
   occupied.delete(key);
+  // Mark it dead BEFORE detaching it. Every enemy-side reference (fightingDefender,
+  // chasingDefender, blockedByWall) is invalidated only by checking `.alive`, so a
+  // sold defender that stayed "alive" kept passing all of those guards: enemies went
+  // on fighting an invisible object at its last position while the lane sat
+  // undefended, and when their phantom swings finally drove its still-tracked hp to
+  // 0, dealDefenderDamage ran the full death path on it — bumping waveDefDeaths
+  // (silently costing the "no defenders lost" star for a unit the player chose to
+  // sell) and calling occupied.delete() on a tile that may since hold a NEW tower,
+  // letting a second defender be stacked on top of it.
+  def.alive = false;
+  def.dying = false;
+  def.hp = 0;
+  // Drop the references now rather than waiting for each orc's next-frame guard, so
+  // there is no window of swinging at empty ground, and the melee slots free up
+  // immediately for whatever the player builds next.
+  for (const o of orcs) {
+    if (o.fightingDefender === def) { releaseAttackSlot(def, o); o.attackSlot = -1; o.fightingDefender = null; }
+    if (o.chasingDefender  === def) o.chasingDefender = null;
+    if (o.blockedByWall    === def) o.blockedByWall = null;
+  }
   const sellPos = posAbove(def.group.position, 1.5);
   scene.remove(def.group); disposeGroup(def.group);
   defenders.splice(defenders.indexOf(def), 1);
@@ -11156,11 +13302,13 @@ function _setRallyPoint(d, col, row) {
   d._rallyMarker = _buildRallyMarker();
   d._rallyMarker.position.set(col, 0, row);
   scene.add(d._rallyMarker);
+  SND.rallySet?.();
   showTooltip(`Rally set — ${_DP_NAMES[d.type] || d.type} marching out`, 1600);
   _unlockAchievement('rallyMaster');
 }
 
 function _clearRallyPoint(d) {
+  SND.rallyClear?.();
   d.rallyX = null;
   d.rallyZ = null;
   if (d._rallyMarker) {
@@ -11206,7 +13354,9 @@ function _refreshDefPanel() {
   _dpStars.textContent = (lv === 3 ? '★★★' : lv === 2 ? '★★' : '★') + (killCount > 0 ? `  💀${killCount}` : '');
 
   // Upgrade button
-  if (d.type === 'spiketrap' || d.type === 'wall') {
+  // 'wall' removed from this guard — the branch below already had full wall support
+  // (cost, kill gate, "⬆ Archer" / "⬆ Catapult" labels) that this line made unreachable.
+  if (d.type === 'spiketrap') {
     _dpUpgradeBtn.disabled = true;
     _dpUpgradeBtn.textContent = 'No Upgrade';
   } else if (lv >= 3) {
@@ -11309,6 +13459,7 @@ _dpRallyBtn.addEventListener('click', (e) => {
   } else {
     // No rally → arm targeting
     _rallyTargeting = true;
+    SND.rallyArm?.();
     showTooltip('Click any tile to set rally point. Right-click to cancel.', 2400);
   }
   _refreshDefPanel();
@@ -11431,6 +13582,9 @@ function _studioInit() {
   // hard shadows (BasicShadowMap = no softening, true voxel-style)
   _stRenderer.shadowMap.enabled = true;
   _stRenderer.shadowMap.type = THREE.BasicShadowMap;
+  // Match the main renderer's filmic grading so studio-built units preview true to in-game look
+  _stRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+  _stRenderer.toneMappingExposure = 1.25;
 
   _stScene = new THREE.Scene();
 
@@ -11524,7 +13678,9 @@ function _studioInit() {
 
   // Load saved objects from localStorage (with schema versioning)
   const _ss = loadSave('td_studio_objects', null);
-  if (_ss && typeof _ss === 'object') studioSaved = _ss;
+  // Must be an array — a corrupted `{}` would otherwise pass a bare typeof check
+  // and make the next _studioSave() throw on studioSaved.push.
+  if (Array.isArray(_ss)) studioSaved = _ss;
 
   window.addEventListener('resize', () => {
     if (!studioMode) return;
@@ -11535,8 +13691,17 @@ function _studioInit() {
 }
 
 function enterStudio() {
+  // Leave any other mode first. The ESC menu's switcher already does this
+  // (exitTestMode / exitStudio / exitMapEditorMode before entering the target), but
+  // the global "B" shortcut calls straight in here — so pressing B inside the Map
+  // Editor opened Studio ON TOP of it, leaving studioMode and mapEditorMode both
+  // true with two update paths live at once. Guarding at the source covers every
+  // entry point rather than just the menu.
+  if (testMode)           exitTestMode();
+  else if (mapEditorMode) exitMapEditorMode();
   _studioInit();
   studioMode = true;
+  document.body.classList.add('studio-open');
   selectedTool = null; selectedDef = null; _defPanel.style.display = 'none';
   ghostMesh.visible = false;
   _buildCards.forEach(c => c.classList.remove('selected'));
@@ -11552,6 +13717,7 @@ function enterStudio() {
 function exitStudio() {
   _worldDeselect();
   studioMode = false;
+  document.body.classList.remove('studio-open');
   // Same reasoning as exitTestMode — clear any stale level/timer state
   currentLevel = null;
   if (_levelCompleteTimer) { clearTimeout(_levelCompleteTimer); _levelCompleteTimer = null; }
@@ -11828,7 +13994,17 @@ function _stLayerRefreshUI() {
   const list = document.getElementById('studio-layer-list');
   if (!list) return;
   list.innerHTML = '';
-  [..._stLayers].reverse().forEach(lay => {
+  [..._stLayers].reverse().forEach((lay, i) => {
+    // Index of this layer in the ORIGINAL _stLayers array. The panel renders
+    // reversed (visual top = LAST array entry), and the reorder-button disable
+    // checks below are written against the original ordering.
+    //
+    // This was referenced as a bare `idx` that no scope ever declared, so under
+    // ES-module strict mode the first iteration threw ReferenceError — before
+    // list.appendChild(row) at the end of the body. Net effect: the Studio's layer
+    // panel rendered ZERO rows, every time, and the exception surfaced as an
+    // "Uncaught ReferenceError: idx is not defined" whenever anything refreshed it.
+    const idx = _stLayers.length - 1 - i;
     const row = document.createElement('div');
     row.className = 'studio-layer-item' + (lay.id === _stActiveLayerId ? ' active' : '');
     row.dataset.id = lay.id;
@@ -12882,20 +15058,28 @@ function _meEraseAt(col, row) {
       if (cell) { cell.mesh.material = newMat; cell.type = newType; }
     });
   }
-  // 3. Remove from path arrays
+  // 3. Remove from path arrays.
+  // _mePaths[pi] is ORDER-SENSITIVE: _meRebuildPaths does `PATHS[pi] = _mePaths[pi].slice()`,
+  // so the array order is literally the order enemies walk the route. Record each tile's
+  // index as well as its lane, so undo can put it back where it was — the previous version
+  // push()ed it onto the END, which silently rewrote the route: erase a tile from the middle
+  // of a path, press Ctrl+Z, and the enemies' walk order now ran to the far end and doubled
+  // back to that tile.
   const removedPaths = [];
   for (let pi = 0; pi < 3; pi++) {
     if (_mePathTiles[pi][key]) {
-      removedPaths.push(pi);
+      const at = _mePaths[pi].findIndex(([c, r]) => c === col && r === row);
+      removedPaths.push({ pi, at: at === -1 ? _mePaths[pi].length : at });
       delete _mePathTiles[pi][key];
       _mePaths[pi] = _mePaths[pi].filter(([c,r]) => !(c===col && r===row));
     }
   }
   if (removedPaths.length) {
     undoActions.push(() => {
-      for (const pi of removedPaths) {
+      // Ascending index order so earlier splices don't shift later ones out of place.
+      for (const { pi, at } of [...removedPaths].sort((a, b) => a.at - b.at)) {
         _mePathTiles[pi][key] = true;
-        _mePaths[pi].push([col, row]);
+        _mePaths[pi].splice(Math.min(at, _mePaths[pi].length), 0, [col, row]);
       }
       _meRebuildPaths();
     });
@@ -12909,8 +15093,19 @@ function _meEraseAt(col, row) {
 }
 
 function _meClearAll() {
+  // Drop the undo history FIRST. The place/erase undo closures capture their group
+  // and re-add it with scene.add(item.group) (see 14757), so once we start disposing
+  // below, any surviving closure would resurrect a group whose geometry has been
+  // freed. Everything those closures could restore is being destroyed here anyway.
+  _meUndoStack.length = 0;
+  _meUndoBatch = null;
   // Remove editor-placed objects
-  for (const item of _meItems) scene.remove(item.group);
+  // dispose, not just detach — every sibling loop in this function pairs removal with
+  // a dispose, and box() allocates fresh BoxGeometry per mesh with no cache. Dropping
+  // the last reference without disposing stranded each editor object's GPU buffers
+  // for the life of the page, so place-objects → load-map → repeat grew VRAM
+  // monotonically until the context dropped.
+  for (const item of _meItems) { scene.remove(item.group); disposeGroup(item.group); }
   _meItems.length = 0;
 
   // Remove all initial scenery (trees, rocks, buildings, wells, border trees)
@@ -12929,7 +15124,9 @@ function _meClearAll() {
   lanternLights.length = 0;
 
   // Remove all hill meshes
-  for (const m of hillMeshes) { m.geometry.dispose(); scene.remove(m); }
+  // m.dispose() releases the per-instance matrix buffer on InstancedMesh; plain
+  // Meshes don't define it, hence the optional call.
+  for (const m of hillMeshes) { m.geometry.dispose(); m.dispose?.(); scene.remove(m); }
   hillMeshes.length = 0;
 
   // Restore pond tiles to grass and remove water surface planes
@@ -12987,6 +15184,7 @@ function _meLoadMap(data) {
   if (data.biome >= 0) {
     activeBiomeIdx = -1;
     applyBiome(data.biome);
+    try { SND.setSong(BIOME_SONGS[data.biome] || 'classic'); } catch {}   // custom map gets its biome's theme
     document.querySelectorAll('.me-biome-btn').forEach(b => {
       b.classList.toggle('active', parseInt(b.dataset.biome) === data.biome);
     });
@@ -13099,6 +15297,10 @@ function enterMapEditorMode() {
   if (studioMode) exitStudio();
   mapEditorMode = true;
   _meUndoStack.length = 0; // fresh undo stack each session
+  // Editor needs live per-tile painting feedback: show the individual tile meshes and hide
+  // the merged ground meshes while editing. Re-merged on exit (see exitMapEditorMode).
+  for (const k in grid) if (grid[k].mesh) grid[k].mesh.visible = true;
+  for (const gm of _groundMeshes) gm.visible = false;
   document.getElementById('hud').style.display = 'none';
   document.getElementById('build-panel').style.display = 'none';
   document.getElementById('scroll-hint').style.display = 'none';
@@ -13123,6 +15325,7 @@ function enterMapEditorMode() {
       btn.addEventListener('click', () => {
         activeBiomeIdx = -1;
         applyBiome(i);
+        try { SND.setSong(BIOME_SONGS[i] || 'classic'); } catch {}   // preview the biome's theme
         document.querySelectorAll('.me-biome-btn').forEach(x => x.classList.toggle('active', parseInt(x.dataset.biome) === i));
       });
       biomeGrid.appendChild(btn);
@@ -13133,6 +15336,9 @@ function enterMapEditorMode() {
 
 function exitMapEditorMode() {
   mapEditorMode = false;
+  // Bake any edits back into the merged ground meshes and re-hide the individual tiles.
+  for (const k in grid) if (grid[k].mesh) grid[k].mesh.visible = false;
+  rebuildGround();
   // Same reasoning as exitTestMode — clear any stale level/timer state
   currentLevel = null;
   if (_levelCompleteTimer) { clearTimeout(_levelCompleteTimer); _levelCompleteTimer = null; }
@@ -13977,7 +16183,16 @@ function _cmpOutcome(a, b) {
     }, 0) + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
     const totalStartHp = defenders.reduce((sum, d) => sum + (_bs.defHpAtStart.get(d) ?? d.maxHp), 0)
       + _bs.defenders.snapshots.reduce((sum, s) => sum + (s.hpLostThisBattle ?? 0), 0);
-    const verdict = escaped === 0 ? 'WIN' : killed === 0 ? 'LOSS' : 'PARTIAL';
+    // A WIN needs the field actually CLEARED, not merely "nobody escaped yet".
+    // Scoring on escapes alone meant a battle that timed out with every enemy still
+    // walking scored WIN at 100% castle HP — which is how the optimizer crowned
+    // spiketrap (range 0.75, frequently never triggers) as the best build in the
+    // game off runs that killed 0 of 12. `remaining` is reported so a stalled
+    // battle is visible in the result instead of masquerading as a clean win.
+    const remaining = Math.max(0, spawned - killed - escaped);
+    const verdict = (escaped === 0 && remaining === 0) ? 'WIN'
+                  : killed === 0                       ? 'LOSS'
+                  :                                      'PARTIAL';
 
     // Per-defender snapshot: merge live defenders with killed ones (which are
     // spliced from the array after their death animation finishes)
@@ -13995,7 +16210,7 @@ function _cmpOutcome(a, b) {
     const killEfficiency = costTotal > 0 ? Math.round(killed / costTotal * 100) / 100 : 0;
 
     return {
-      verdict, duration: parseFloat(dur), spawned, killed, escaped,
+      verdict, duration: parseFloat(dur), spawned, killed, escaped, remaining,
       defKilled: _bs.defenders.killed,
       hpLost: Math.round(hpLost),
       hpPct: totalStartHp > 0 ? Math.round((1 - hpLost / totalStartHp) * 100) : 100,
@@ -15088,6 +17303,14 @@ function _cmpOutcome(a, b) {
     btnTest.classList.add('active');
     panel.style.display = 'block';
 
+    // Hide the generated landscape's hills. The test arena is a fixed corridor
+    // placed over whatever terrain the map happened to generate, so hills end up
+    // intersecting its walls and defender slots. Hiding the meshes (rather than
+    // marking their tiles unbuildable) keeps every placement legal — the build
+    // check rejects `scenery` tiles with no test-mode bypass, so blocking them
+    // would make the balance harness's fixed placements silently fail.
+    for (const m of hillMeshes) m.visible = false;
+
     // Hide game-only UI so nothing overlaps
     gameOnlyEls.forEach(el => { if (el) el.style.display = 'none'; });
     ghostMesh.visible = false;
@@ -15131,6 +17354,13 @@ function _cmpOutcome(a, b) {
     _testSpawnQueue.length = 0;
     waveActive = false;
     spawnQueue.length = 0;
+    // Re-enable Start Wave. Entering the arena mid-wave leaves the button disabled
+    // (btn-start disables it on launch), and clearing waveActive here means
+    // checkWaveEnd() bails at its first line and can never re-enable it — so without
+    // this, ESC -> Test Arena -> Return to Game mid-wave stranded the player with a
+    // dead Start button. Unconditional re-enable is right because dropping out of
+    // test mode abandons the run anyway (currentLevel is nulled just below).
+    if (elBtnStart) { elBtnStart.disabled = false; elBtnStart.style.display = ''; }
 
     // Dropping out of test mode means we are NOT resuming an interrupted level —
     // clear currentLevel so Retry/Resume don't reference a stale campaign run.
@@ -15141,6 +17371,7 @@ function _cmpOutcome(a, b) {
     _dismissAllOverlays();
 
     testMode = false;
+    for (const m of hillMeshes) m.visible = true;   // restore the landscape hidden on entry
     _mcTickEnabled = false; // stop MessageChannel ticker
     _gameLoopRafId = requestAnimationFrame(gameLoop); // restart rAF chain
     castleSceneActive = false;
@@ -15259,6 +17490,7 @@ function _openEscMenu() {
     gameSpeed = 0;
     elBtnPause.textContent = '▶ Play';
   }
+  _syncEscDiffButtons();   // highlight the difficulty that is actually in effect
   const cur = testMode ? 'test' : studioMode ? 'studio' : mapEditorMode ? 'map' : '';
   const inSpecialMode = cur !== '';
   // Highlight whichever mode is currently active
@@ -15320,30 +17552,46 @@ document.getElementById('esc-test').addEventListener('click', () => {
 });
 
 // ── DIFFICULTY MODE ───────────────────────────────────────────────────
+// These used to be a SECOND, divergent difficulty system: they assigned difficultyMult
+// wholesale from hardcoded numbers copied out of the test-arena table (easy 0.7/0.85,
+// hard 1.4/1.2) instead of the real presets, dropped rewardMult entirely so
+// `(difficultyMult.rewardMult || 1)` silently fell back to 1.0, never set
+// currentDifficulty — so the HUD badge kept reading the old mode and bestTimes /
+// endless records were filed under the wrong tier — and were wiped by the next
+// startLevel()'s applyDifficulty(). Route through the one canonical path instead,
+// exactly as the level-select .lsd-btn handlers do.
 document.querySelectorAll('.diff-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
     const d = btn.dataset.diff;
-    if (d === 'easy')   { difficultyMult = { hp: 0.7, speed: 0.85 }; showTooltip('Easy mode — enemies are weaker', 2000); }
-    else if (d === 'hard') { difficultyMult = { hp: 1.4, speed: 1.2 };  showTooltip('Hard mode — enemies are tougher & faster!', 2000); }
-    else                { difficultyMult = { hp: 1.0, speed: 1.0 };  showTooltip('Normal mode', 1500); }
+    if (!DIFFICULTY_PRESETS[d] || d === currentDifficulty) { _closeEscMenu(); return; }
+    currentDifficulty = d;
+    applyDifficulty();     // sets difficultyMult (incl. rewardMult) AND the HUD badge
+    saveDifficulty();      // persists, so the choice survives a reload
+    _syncEscDiffButtons();
+    const p = DIFFICULTY_PRESETS[d];
+    showTooltip(`${p.icon} ${p.label} mode`, 2000);
     _closeEscMenu();
   });
 });
+// The ESC menu never seeded .active from the real setting, so it always showed
+// "Normal" highlighted — and clicking that already-highlighted button silently
+// downgraded a Hard run. Called on open so the highlight reflects reality.
+function _syncEscDiffButtons() {
+  document.querySelectorAll('.diff-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.diff === currentDifficulty));
+}
 
 // ── SETTINGS (volume sliders) ─────────────────────────────────────────
 (function _initSettings() {
-  // Guard JSON.parse — corrupted save must not break the sliders & SFX wiring.
-  let saved = {};
-  try {
-    const raw = localStorage.getItem('td_settings');
-    if (raw) saved = JSON.parse(raw) || {};
-  } catch (err) {
-    console.warn('td_settings corrupted, using defaults:', err);
-  }
+  // Read through loadSave, not localStorage directly: td_settings is registered in
+  // CURRENT_SAVE_VERSIONS and written via saveSave, so a raw read here would skip
+  // any migration ever added for it. loadSave also already guards corrupted JSON.
+  const saved = loadSave('td_settings', {}) || {};
   const sfxDef   = saved.sfx   != null ? saved.sfx   : 32;
-  const musicDef = saved.music > 0     ? saved.music : 40;
+  // `!= null`, not `> 0`: a stored 0 is a deliberate mute, and the truthiness-style
+  // guard threw it away and reset the slider to 40 on every reload — so muting the
+  // music never survived a refresh. Matches the sfx line directly above.
+  const musicDef = saved.music != null ? saved.music : 40;
 
   const sfxSlider   = document.getElementById('sfx-slider');
   const musicSlider = document.getElementById('music-slider');
@@ -15407,19 +17655,28 @@ elBtnStart.addEventListener('click', () => {
   // Inside a level, the layout + biome are fixed (set in startLevel). Only rotate
   // when playing endless/no-level mode, so level themes don't get overwritten.
   const inLevelNonEndless = currentLevel && currentLevel.id !== 'endless';
+  // Declared OUT here on purpose: the wave-start tooltip below reads all four.
+  // They used to be block-scoped `const`s inside the branch, so reading them at
+  // the tooltip threw `ReferenceError: biomeChanged is not defined` on every
+  // single wave start — killing the "Wave N incoming!" tooltip outright. It never
+  // showed up in testing because TEST.wave() drives TEST.battle() directly and
+  // never runs this button handler; only a real player clicking Start Wave hits it.
+  let layoutIdx = -1, biomeIdx = -1, layoutChanged = false, biomeChanged = false;
   if (!inLevelNonEndless) {
     // Waves 1-3: Blitz (short paths, fast action). Wave 4+: cycle through longer layouts.
-    const layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
-    const biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
-    const layoutChanged = layoutIdx !== activeLayoutIdx;
-    const biomeChanged  = biomeIdx  !== activeBiomeIdx;
+    layoutIdx = wave <= 3 ? 0 : 1 + Math.floor((wave - 4) / 3) % (LAYOUT_WAYPOINTS.length - 1);
+    biomeIdx  = Math.floor((wave - 1) / 3) % BIOMES.length;
+    layoutChanged = layoutIdx !== activeLayoutIdx;
+    biomeChanged  = biomeIdx  !== activeBiomeIdx;
     const hasEditorPaths = _mePaths.some(p => p.length > 0);
-    if (layoutChanged && !hasEditorPaths) {
-      applyLayout(layoutIdx);
-      const _songMap = {'Blitz':'blitz','Classic Winding':'classic','Wide Sweeps':'wide','Comb':'comb','Switchback':'switchback'};
-      SND.setSong(_songMap[LAYOUT_WAYPOINTS[layoutIdx].name] || 'blitz');
-    }
+    if (layoutChanged && !hasEditorPaths) applyLayout(layoutIdx);
     if (biomeChanged)  applyBiome(biomeIdx);
+    // Music follows the BIOME, not the layout. The biome is what the player
+    // actually sees change (Icelands → Lava → …), and it cycles on its own
+    // 3-wave clock; driving the song off the layout name meant you could be
+    // standing in the snow with the siege track playing. setSong is idempotent,
+    // so calling it every wave costs nothing and covers the first wave too.
+    SND.setSong(BIOME_SONGS[biomeIdx] || 'blitz');
   } else {
     // In a story level — keep the level's own theme (set in startLevel); don't let the
     // layout-derived song override it. setSong is idempotent so this is a cheap no-op.
@@ -15477,7 +17734,7 @@ elBtnStart.addEventListener('click', () => {
   if (currentLevel?.id === 'endless' && wave >= 20) _unlockAchievement('endlessWave20');
   waveStartHp   = castleHp;
   waveDefDeaths = 0;
-  waveStartTime = Date.now();
+  waveStartTime = _simClockMs;
   SND.waveStart();
   elBtnStart.disabled = true;
   updateHUD();
@@ -15527,6 +17784,17 @@ document.getElementById('lc-next')?.addEventListener('click', (e) => {
 document.getElementById('ls-close')?.addEventListener('click', () => {
   SND.btnClick?.();
   hideLevelSelect();
+  // Put the run back exactly as showLevelSelect found it. Restoring waveActive is
+  // what lets checkWaveEnd() run again and re-enable Start Wave; restoring the
+  // button's own disabled flag keeps a mid-wave close from handing the player a
+  // second wave they haven't earned.
+  if (_lsRunSnapshot) {
+    currentLevel = _lsRunSnapshot.currentLevel;
+    waveActive   = _lsRunSnapshot.waveActive;
+    if (elBtnStart) elBtnStart.disabled = _lsRunSnapshot.startDisabled;
+    gameSpeed    = _lsRunSnapshot.gameSpeed;
+    _lsRunSnapshot = null;
+  }
   if (gameSpeed === 0) gameSpeed = 1;
 });
 
@@ -15542,19 +17810,23 @@ document.getElementById('stats-screen')?.addEventListener('click', (e) => {
 
 // Debounced resize — dragging the window edge fires hundreds of events; we only
 // need to act once the user stops dragging (or 80ms later, whichever's sooner).
-let _resizeRAF = 0;
-let _resizeT   = 0;
+// NOTE: no requestAnimationFrame here — rAF never fires in hidden/background tabs,
+// which left the canvas at a stale (even 0×0) size until the tab was refocused.
+let _resizeT = 0;
+function _applyRendererSize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
 window.addEventListener('resize', () => {
   if (_resizeT) clearTimeout(_resizeT);
   _resizeT = setTimeout(() => {
     _resizeT = 0;
-    if (_resizeRAF) cancelAnimationFrame(_resizeRAF);
-    _resizeRAF = requestAnimationFrame(() => {
-      _resizeRAF = 0;
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    });
+    _applyRendererSize();
+    // Re-tile the world map so its blocks stay square at the new aspect
+    if (document.getElementById('level-select')?.classList.contains('visible')) {
+      showLevelSelect({ ..._lsLastOpts, noIntro: true });
+    }
   }, 80);
 });
 
@@ -15570,6 +17842,9 @@ M.meDirt.map  = makeDirtTex();  M.meDirt.color.setHex(0xffffff);  M.meDirt.needs
 M.meSand.map  = makeSandTex();  M.meSand.color.setHex(0xffffff);  M.meSand.needsUpdate  = true;
 M.meLava.map  = makeLavaTex();  M.meLava.color.setHex(0xffffff);  M.meLava.needsUpdate  = true;
 buildSky();
+buildClouds();
+buildAtmosphere();
+_applyAtmosphereBiome(activeBiomeIdx >= 0 ? activeBiomeIdx : 0);
 applyBiome(0);
 initLayout(0);
 buildGrid();

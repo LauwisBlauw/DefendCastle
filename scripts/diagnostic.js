@@ -8,6 +8,20 @@ const SPEED = 4;
 const T     = 16;   // per-battle timeout (seconds)
 const report = { generated: new Date().toISOString(), speed: SPEED, sections: {} };
 
+// ── Warm-up battle — result deliberately DISCARDED ───────────────────────────
+// The first battle after a page load never engages: it reports killed=0,
+// escaped=3, castle 100% no matter which defenders are placed. Reproduced by
+// running one identical build 4x from a fresh load — run #0 stalled, runs #1-3
+// came back 68/65/77. Without this throwaway, the first real cell of section 1
+// (tower vs grunt×8) is always garbage, and every stat read from it is wrong.
+console.log('[DIAG] Warm-up battle (discarded)…');
+await TEST.battle({
+  label: 'warmup-discarded',
+  defenders: [['tower', 40, 26]],
+  enemies:   [['grunt', 2]],
+  speed: SPEED, timeout: T,
+});
+
 // Helper: reduce a battle result to the key fields worth reporting
 const slim = r => ({
   label: r.label, verdict: r.verdict,

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Castle Defenders!</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@700;800;900&family=Cinzel:wght@700;900&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -26,6 +26,17 @@
       display: block;
       cursor: crosshair;
     }
+    /* Soft cinematic vignette over the 3D view — sits above the canvas, below all UI.
+       Hidden whenever a fullscreen overlay (level select, studio) covers the game. */
+    #vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 40;
+      background: radial-gradient(ellipse 130% 105% at 50% 42%, transparent 56%, rgba(8, 6, 26, 0.34) 100%);
+    }
+    body:has(#level-select.visible) #vignette,
+    body.studio-open #vignette { display: none; }
 
     /* ── TOP HUD ── */
     #hud {
@@ -120,6 +131,34 @@
       min-width: 64px;
       text-shadow: 0 0 8px rgba(0,255,100,0.5);
       font-family: 'Fredoka One', sans-serif;
+    }
+
+    /* Narrow windows: the HUD grows mid-wave (the Enemies segment appears once a
+       wave is live, and endless adds Next Bonus on top of that). At 1280px that
+       overflowed the flex row and clipped Start Wave off the right edge. Tighten
+       segment padding and the HP bar so the full set still fits.
+       NOTE: must stay below every #castle-hp-* / .hud-* rule above — a media query
+       adds no specificity, so an earlier position loses these on source order. */
+    @media (max-width: 1340px) {
+      #hud { padding: 0 6px; }
+      .hud-seg, #castle-hp-wrap { padding: 0 7px; }
+      .hud-icon { font-size: 21px; }
+      .hud-val { font-size: 20px; min-width: 28px; }
+      #castle-hp-track { width: 104px; }
+      #castle-hp-text { min-width: 56px; font-size: 12px; }
+    }
+    /* Second tier: the tightening above only buys enough room down to ~1250px.
+       Below that, squeeze harder — still no data hidden, only chrome. */
+    @media (max-width: 1250px) {
+      #hud { padding: 0 4px; }
+      .hud-seg, #castle-hp-wrap { padding: 0 4px; }
+      .hud-seg { gap: 5px; }
+      .hp-top-row { gap: 5px; }
+      .hud-icon { font-size: 17px; }
+      .hud-label { font-size: 9px; letter-spacing: 0.04em; }
+      .hud-val { font-size: 17px; min-width: 22px; }
+      #castle-hp-track { width: 74px; }
+      #castle-hp-text { min-width: 44px; font-size: 11px; }
     }
 
     /* Start Wave button */
@@ -582,12 +621,17 @@
     #btn-retry:hover, #btn-go-levels:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(0,0,0,0.6); }
     #btn-retry:active, #btn-go-levels:active { transform: translateY(1px) scale(0.98); }
 
-    /* ── LEVEL SELECT – WORLD MAP ── */
+    /* ══════════════════════════════════════════════════════════════════
+       LEVEL SELECT — "THE FIVE REALMS OF AVALON"
+       A blocky 2-D world map, hung like a campaign chart in a stone hall.
+       Everything here is deliberately hard-edged to match the voxel game:
+       square corners, flat fills, hard un-blurred offset shadows and
+       stepped transitions — no glossy radii or soft glows.
+       ══════════════════════════════════════════════════════════════════ */
     #level-select {
       position: fixed;
       inset: 0;
-      /* Calm twilight gradient — clean, uncluttered backdrop for the roadmap */
-      background: radial-gradient(ellipse 120% 90% at 50% 4%, #2e4f8a 0%, #1c3060 46%, #121d3c 100%);
+      background: #0c0906;
       display: none;
       flex-direction: column;
       z-index: 600;
@@ -606,285 +650,475 @@
       display: none !important;
     }
 
-    /* One soft star-dust + vignette layer for depth (no busy patterns) */
+    /* Mortared stone wall the map hangs on — square blocks, offset courses */
     #level-select::before {
       content: "";
       position: absolute; inset: 0;
-      pointer-events: none;
-      z-index: 0;
+      z-index: 0; pointer-events: none;
       background:
-        radial-gradient(circle at 16% 24%, rgba(255,255,255,0.06) 0 1.2px, transparent 2px),
-        radial-gradient(circle at 74% 14%, rgba(255,255,255,0.05) 0 1.2px, transparent 2px),
-        radial-gradient(circle at 88% 40%, rgba(255,255,255,0.04) 0 1.2px, transparent 2px),
-        radial-gradient(ellipse 80% 70% at 50% 64%, transparent 40%, rgba(0,0,0,0.34) 100%);
+        repeating-linear-gradient(90deg, rgba(0,0,0,0) 0 70px, rgba(0,0,0,0.55) 70px 74px),
+        repeating-linear-gradient(0deg,  rgba(0,0,0,0) 0 44px, rgba(0,0,0,0.55) 44px 48px),
+        linear-gradient(180deg, #241a10 0%, #17110a 60%, #0c0906 100%);
+    }
+    /* Torch-lit vignette over the whole hall (sits under the nodes) */
+    #level-select::after {
+      content: "";
+      position: absolute; inset: 0;
+      z-index: 3; pointer-events: none;
+      background: radial-gradient(ellipse 80% 70% at 50% 46%, transparent 38%, rgba(0,0,0,0.68) 100%);
     }
 
     #ls-header { display: none; }
-    #ls-close {
-      position: fixed;
-      right: 22px;
-      top: 22px;
-      z-index: 10;
-      width: 38px; height: 38px;
-      border-radius: 50%;
-      border: 1px solid rgba(255,255,255,0.18);
-      background: rgba(20,32,60,0.72);
-      backdrop-filter: blur(8px);
-      color: #fff;
-      font-size: 16px;
-      font-weight: 900;
-      cursor: pointer;
-      font-family: 'Fredoka One', sans-serif;
-      display: flex; align-items: center; justify-content: center;
-      line-height: 1;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    }
-    #ls-close:hover { background: rgba(40,56,92,0.85); }
-    #ls-close:active { transform: scale(0.94); }
 
-    /* ── The roadmap canvas ── */
+    /* ── The map canvas ── */
     #ls-map {
       position: relative;
       flex: 1;
       overflow: hidden;
       z-index: 1;
+      /* Deepest sea tone from the terrain palette. The world now sits on a
+         fixed-aspect stage, so on window shapes that don't match 40:25 there are
+         letterbox margins — filling them with sea makes them read as more ocean
+         beyond the chart rather than as empty bars. */
+      background: #143363;
     }
 
-    /* ── Clean title at the top ── */
+    /* Fixed-aspect artboard holding everything in world space. Sized in JS to the
+       largest 40:25 box that fits, and centred. The level nodes are %-positioned
+       against THIS, not the panel, so they stay locked to the terrain at every
+       window shape. */
+    .ls-stage {
+      position: absolute;
+      overflow: hidden;
+    }
+
+    /* The tile terrain itself. preserveAspectRatio="none" + a grid sized from
+       the container keeps tiles square AND keeps tile space in exact agreement
+       with the %-positioned nodes on top. */
+    .ls-terrain {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      display: block;
+      z-index: 1;
+      shape-rendering: crispEdges;
+    }
+    /* A glimmer that runs the road toward the realm you should take next */
+    .rm-spark {
+      opacity: 0;
+      animation: rm-march 1.7s steps(1) infinite;
+    }
+    @keyframes rm-march {
+      0%, 86% { opacity: 0; }
+      90%     { opacity: 0.9; }
+      100%    { opacity: 0; }
+    }
+
+    /* Heavy timber-and-iron frame around the chart */
+    .ls-frame {
+      position: absolute; inset: 0;
+      z-index: 8; pointer-events: none;
+      border: 13px solid #33240f;
+      box-shadow:
+        inset 0 0 0 3px #8a6a2c,
+        inset 0 0 0 6px #120d06,
+        inset 0 0 60px rgba(0,0,0,0.45);
+    }
+    .ls-corner {
+      position: absolute;
+      width: 30px; height: 30px;
+      z-index: 9; pointer-events: none;
+      background: linear-gradient(135deg, #a9843a 0%, #5a4119 55%, #2a1d0c 100%);
+      box-shadow: inset 0 0 0 3px #120d06;
+    }
+    .ls-corner.tl { top: 5px; left: 5px; }
+    .ls-corner.tr { top: 5px; right: 5px; }
+    .ls-corner.bl { bottom: 5px; left: 5px; }
+    .ls-corner.br { bottom: 5px; right: 5px; }
+
+    /* Cartographer's flourishes floating over the sea (plain HTML so the
+       stretched terrain SVG can't distort the lettering) */
+    .ls-compass {
+      position: absolute;
+      z-index: 4; pointer-events: none;
+      width: clamp(58px, 6.2vw, 88px); height: auto;
+      opacity: 0.72;
+    }
+    .ls-sea-note {
+      position: absolute;
+      z-index: 4; pointer-events: none;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      font-style: italic;
+      color: rgba(190, 214, 246, 0.34);
+      font-size: clamp(8px, 0.95vw, 12px);
+      letter-spacing: 0.42em;
+      white-space: nowrap;
+      text-shadow: 1px 1px 0 rgba(6,14,30,0.7);
+    }
+    /* Slow blocky clouds drifting across the sea */
+    .ls-cloud {
+      position: absolute;
+      z-index: 4; pointer-events: none;
+      opacity: 0.2;
+      animation: ls-drift linear infinite;
+    }
+    @keyframes ls-drift {
+      from { transform: translateX(-14vw); }
+      to   { transform: translateX(114vw); }
+    }
+
+    /* ── Title plaque — a nailed oak sign ── */
     .ls-title-banner {
       position: absolute;
-      top: 26px;
-      left: 50%;
+      top: 20px; left: 50%;
       transform: translateX(-50%);
-      z-index: 8;
+      z-index: 12;
       text-align: center;
-      font-family: 'Fredoka One', sans-serif;
-      color: #fff;
-      font-size: 30px;
-      letter-spacing: 0.03em;
-      text-shadow: 0 2px 0 rgba(0,0,0,0.35), 0 0 26px rgba(120,170,255,0.45);
-    }
-    .ls-title-banner .lt-sub {
-      display: block;
-      font-family: 'Nunito', sans-serif;
-      font-weight: 800;
-      font-size: 11px;
-      letter-spacing: 0.34em;
-      color: rgba(184,206,255,0.72);
-      margin-top: 5px;
-      text-shadow: none;
-    }
-
-    /* ── Roadmap connecting path ── */
-    .ls-path-svg {
-      position: absolute;
-      inset: 0;
-      width: 100%; height: 100%;
-      overflow: visible;
-      z-index: 2;
+      padding: 9px 34px 10px;
+      background: linear-gradient(180deg, #4e3719 0%, #3a2710 55%, #281a09 100%);
+      box-shadow:
+        inset 0 0 0 3px #a9843a,
+        inset 0 4px 0 rgba(255,224,160,0.14),
+        0 0 0 3px #120d06,
+        0 7px 0 rgba(0,0,0,0.5);
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 900;
+      color: #f7e7c2;
+      font-size: clamp(14px, 1.9vw, 25px);
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      text-shadow: 2px 2px 0 #1a1006;
+      white-space: nowrap;
       pointer-events: none;
     }
-    .ls-track {
-      fill: none;
-      stroke: rgba(255,255,255,0.12);
-      stroke-width: 2.6;
-      stroke-linecap: round;
-      stroke-linejoin: round;
+    /* Iron nails holding the sign up */
+    .ls-title-banner::before,
+    .ls-title-banner::after {
+      content: "";
+      position: absolute; top: 50%;
+      width: 8px; height: 8px;
+      transform: translateY(-50%);
+      background: #c9a459;
+      box-shadow: inset 0 0 0 2px #3a2a12;
     }
-    .ls-stripe {
-      fill: none;
-      stroke: rgba(255,216,134,0.75);
-      stroke-width: 0.7;
-      stroke-linecap: round;
-      stroke-dasharray: 0.5 2.4;
+    .ls-title-banner::before { left: 10px; }
+    .ls-title-banner::after  { right: 10px; }
+    .ls-title-banner .lt-sub {
+      display: block;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      font-size: clamp(7px, 0.8vw, 10px);
+      letter-spacing: 0.44em;
+      color: #c8a768;
+      margin-top: 5px;
+      text-shadow: 1px 1px 0 #1a1006;
     }
 
-    /* ── Level NODE (clean circular badge) ── */
+    #ls-close {
+      position: fixed;
+      right: 26px; top: 26px;
+      z-index: 14;
+      width: 40px; height: 40px;
+      border: none; border-radius: 0;
+      background: linear-gradient(180deg, #4e3719, #2a1c0a);
+      box-shadow: inset 0 0 0 3px #a9843a, 0 0 0 3px #120d06, 0 5px 0 rgba(0,0,0,0.5);
+      color: #f2dfb4;
+      font-size: 17px; font-weight: 900;
+      cursor: pointer;
+      font-family: 'Cinzel', Georgia, serif;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1;
+      transition: transform 0.1s steps(2);
+    }
+    #ls-close:hover { color: #fff; background: linear-gradient(180deg, #61451f, #33220c); }
+    #ls-close:active { transform: translateY(3px); }
+
+    /* ── Realm marker ── */
+    /* Keyboard focus ring. The nodes are now tabbable (they're role=button divs), and
+       the app had no :focus-visible style anywhere — so without this a keyboard user
+       could reach a level but had no idea which one was selected. Uses outline +
+       offset so it sits clear of the node's own decorative ring. */
+    .ls-node:focus-visible {
+      outline: 3px solid #ffdd66;
+      outline-offset: 4px;
+      border-radius: 6px;
+    }
     .ls-node {
       position: absolute;
       transform: translate(-50%, -50%);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 8px;
+      gap: 9px;
       cursor: default;
       user-select: none;
       z-index: 6;
+      /* Stepped entrance so it pops in like sprite animation, not easing.
+         Deliberately scale-only: if the animation ever stalls (throttled
+         background tab, reduced-motion shims) a marker ends up small for a
+         moment rather than invisible, which an opacity fade would cause. */
+      animation: ls-node-pop 0.36s steps(5) backwards;
+      animation-delay: calc(var(--i, 0) * 95ms);
+    }
+    @keyframes ls-node-pop {
+      from { transform: translate(-50%, -50%) scale(0.3); }
+      to   { transform: translate(-50%, -50%) scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ls-node, .ls-node.next .ls-tile, .ls-node.next::before, .rm-spark, .ls-cloud { animation: none; }
+      /* This block used to stop at the level-select screen, so a player who asked the
+         OS for reduced motion still got every in-game looping animation: the pulsing
+         Start button, build-card and objective pulses, the red low-HP throb and the
+         Last Stand flash. Those are the ones that actually run for the whole session.
+         Infinite decorative loops only — one-shot transitions and the 3D scene are
+         untouched, so nothing becomes unreadable or unresponsive. */
+      #btn-start.ready:not(:hover),
+      .build-card.selected::after,
+      #wave-banner #banner-sub,
+      #game-over h1,
+      #last-stand,
+      .bal-cell.running { animation: none !important; }
     }
     .ls-node.unlocked { cursor: pointer; }
-    .ls-node.unlocked:hover .ls-tile {
-      transform: translateY(-4px) scale(1.06);
-      box-shadow: 0 12px 24px rgba(0,0,0,0.5), inset 0 -4px 8px rgba(0,0,0,0.22);
-    }
 
-    /* Round biome medallion — flat fill from the per-node --ring colour + a soft top sheen */
+    /* Squared-off stone plinth, voxel-shaded with hard inset faces */
     .ls-tile {
-      width: 74px; height: 74px;
+      width: clamp(54px, 6.2vw, 78px);
+      height: clamp(54px, 6.2vw, 78px);
       position: relative;
-      border-radius: 50%;
-      background:
-        radial-gradient(circle at 38% 30%, rgba(255,255,255,0.30), rgba(255,255,255,0) 55%),
-        var(--ring, #cf8a10);
-      border: 4px solid rgba(255,255,255,0.88);
-      box-shadow: 0 6px 16px rgba(0,0,0,0.45), inset 0 -4px 8px rgba(0,0,0,0.22);
+      background: var(--stone, #6b6f7a);
+      box-shadow:
+        inset 0   5px 0 rgba(255,255,255,0.26),
+        inset 0  -7px 0 rgba(0,0,0,0.42),
+        inset  5px 0 0 rgba(255,255,255,0.10),
+        inset -5px 0 0 rgba(0,0,0,0.26),
+        0 0 0 4px #120d06,
+        0 9px 0 rgba(0,0,0,0.45);
       display: flex; align-items: center; justify-content: center;
-      transition: transform 0.15s, box-shadow 0.15s;
+      transition: transform 0.12s steps(3), box-shadow 0.12s;
     }
-    .ls-tile-icon { font-size: 34px; line-height: 1; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+    .ls-node.unlocked:hover .ls-tile {
+      transform: translateY(-7px);
+      box-shadow:
+        inset 0   5px 0 rgba(255,255,255,0.30),
+        inset 0  -7px 0 rgba(0,0,0,0.42),
+        0 0 0 4px #120d06,
+        0 0 0 8px var(--ring, #e8b64c),
+        0 16px 0 rgba(0,0,0,0.45);
+    }
+    .ls-tile-icon {
+      width: 64%; height: 64%;
+      display: block;
+      image-rendering: pixelated;
+      filter: drop-shadow(2px 2px 0 rgba(0,0,0,0.45));
+    }
 
-    /* Level-number badge (upper-left) */
+    /* Level-number stone (upper-left) */
     .ls-node-num {
       position: absolute;
-      top: -6px; left: -6px;
-      width: 24px; height: 24px;
-      background: #fff;
-      color: #1b2f5c;
-      border-radius: 50%;
-      font-family: 'Fredoka One', sans-serif;
+      top: -10px; left: -10px;
+      width: 25px; height: 25px;
+      background: linear-gradient(180deg, #f6e3b4, #c9a459);
+      color: #2a1a06;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 900;
       font-size: 13px;
       display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+      box-shadow: inset 0 0 0 2px #7a5c26, 0 0 0 3px #120d06;
     }
-    .ls-node.ls-locked .ls-node-num { background: #9aa4bd; color: #2a3450; }
+    .ls-node.ls-locked .ls-node-num {
+      background: linear-gradient(180deg, #9aa0ab, #656b78);
+      color: #1d2129;
+      box-shadow: inset 0 0 0 2px #444a55, 0 0 0 3px #120d06;
+    }
 
-    /* "Next up" level — gentle pulsing halo to guide the eye */
-    .ls-node.next .ls-tile { animation: ls-pulse 1.7s ease-in-out infinite; }
+    /* "Next up" realm — blinking iron ring + a hanging call-to-arms pennant */
+    .ls-node.next .ls-tile { animation: ls-pulse 1.25s steps(1) infinite; }
     @keyframes ls-pulse {
-      0%, 100% { box-shadow: 0 6px 16px rgba(0,0,0,0.45), inset 0 -4px 8px rgba(0,0,0,0.22), 0 0 0 0 rgba(255,222,120,0.6); }
-      50%      { box-shadow: 0 6px 16px rgba(0,0,0,0.45), inset 0 -4px 8px rgba(0,0,0,0.22), 0 0 0 12px rgba(255,222,120,0); }
+      0%, 100% { outline: 0 solid rgba(255,214,110,0.95); outline-offset: 4px; }
+      50%      { outline: 5px solid rgba(255,214,110,0.95); outline-offset: 9px; }
+    }
+    .ls-node.next::before {
+      /* Plain text — Cinzel has no sword glyph, and a fallback box would show */
+      content: "— MARCH FORTH —";
+      position: absolute;
+      top: -36px; left: 50%;
+      transform: translateX(-50%);
+      padding: 4px 13px;
+      background: linear-gradient(180deg, #f2c855, #bf831b);
+      color: #2c1a02;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 900;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      box-shadow: inset 0 0 0 2px #6b4a12, 0 0 0 3px #120d06, 0 5px 0 rgba(0,0,0,0.45);
+      animation: ls-play-bob 1.25s steps(2) infinite;
+      white-space: nowrap;
+    }
+    @keyframes ls-play-bob {
+      0%, 100% { transform: translateX(-50%) translateY(0); }
+      50%      { transform: translateX(-50%) translateY(-5px); }
     }
 
-    /* Completed — green check badge */
+    /* Conquered — gilded rim + a seal stamped in the corner */
+    .ls-node.done .ls-tile {
+      box-shadow:
+        inset 0   5px 0 rgba(255,255,255,0.26),
+        inset 0  -7px 0 rgba(0,0,0,0.42),
+        0 0 0 4px #120d06,
+        0 0 0 7px #d8ac48,
+        0 9px 0 rgba(0,0,0,0.45);
+    }
     .ls-node.done .ls-tile::after {
       content: "✓";
       position: absolute;
-      right: -4px; bottom: -4px;
-      width: 22px; height: 22px;
-      background: #2fa84a;
+      right: -11px; bottom: -11px;
+      width: 25px; height: 25px;
+      background: linear-gradient(180deg, #62d06a, #1f7a2c);
       color: #fff;
-      border: 2px solid #fff;
-      border-radius: 50%;
-      font-family: 'Fredoka One', sans-serif;
-      font-size: 12px;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.4);
-    }
-
-    /* Locked — muted slate medallion */
-    .ls-node.ls-locked .ls-tile {
-      background: radial-gradient(circle at 38% 30%, rgba(255,255,255,0.12), rgba(255,255,255,0) 55%), #46506a;
-      border-color: rgba(255,255,255,0.35);
-    }
-    .ls-node.ls-locked .ls-tile-icon { opacity: 0.75; filter: grayscale(1); }
-
-    /* ── Difficulty selector pinned to bottom-center ── */
-    /* ── Difficulty selector — glass pill, bottom-center ── */
-    .ls-difficulty {
-      position: absolute;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 6px 8px;
-      background: rgba(20,32,60,0.72);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 30px;
-      backdrop-filter: blur(8px);
-      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
-      z-index: 7;
-      font-family: 'Fredoka One', sans-serif;
-    }
-    .ls-difficulty .lsd-label {
-      align-self: center;
-      color: rgba(184,206,255,0.7);
-      font-size: 10px;
-      letter-spacing: 0.16em;
-      padding: 0 8px;
-    }
-    .ls-difficulty .lsd-btn {
-      padding: 6px 16px;
-      border-radius: 22px;
-      border: none;
-      cursor: pointer;
-      font-family: 'Fredoka One', sans-serif;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 900;
       font-size: 13px;
-      letter-spacing: 0.03em;
-      color: #cdd6ee;
-      background: transparent;
-      transition: all 0.14s;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: inset 0 0 0 2px #10440f, 0 0 0 3px #120d06;
     }
-    .ls-difficulty .lsd-btn:hover { color: #fff; }
-    .ls-difficulty .lsd-btn[data-diff="easy"].active   { background: linear-gradient(180deg, #6cd048 0%, #2c8018 100%); color: #fff; }
-    .ls-difficulty .lsd-btn[data-diff="normal"].active { background: linear-gradient(180deg, #e0b43a 0%, #a07a14 100%); color: #fff; }
-    .ls-difficulty .lsd-btn[data-diff="hard"].active   { background: linear-gradient(180deg, #e0542a 0%, #902a14 100%); color: #fff; }
 
-    /* Labels under each node */
+    /* Sealed realm — cold, unlit stone */
+    .ls-node.ls-locked .ls-tile {
+      background: #4c505c;
+      box-shadow:
+        inset 0   5px 0 rgba(255,255,255,0.12),
+        inset 0  -7px 0 rgba(0,0,0,0.46),
+        inset  5px 0 0 rgba(255,255,255,0.05),
+        inset -5px 0 0 rgba(0,0,0,0.3),
+        0 0 0 4px #120d06,
+        0 9px 0 rgba(0,0,0,0.45);
+    }
+    .ls-node.ls-locked .ls-tile-icon { opacity: 0.75; }
+
+    /* ── Labels beneath each marker ── */
     .ls-node-label { text-align: center; }
     .ls-node-name {
-      font-family: 'Fredoka One', sans-serif;
-      font-size: 13px;
-      color: #fff;
-      letter-spacing: 0.02em;
-      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+      display: inline-block;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      font-size: clamp(10px, 1vw, 13px);
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #f6e6c2;
+      background: rgba(22,15,7,0.85);
+      padding: 3px 10px;
+      box-shadow: inset 0 0 0 2px rgba(169,132,58,0.85), 0 0 0 2px rgba(10,7,3,0.9);
+      text-shadow: 1px 1px 0 #14100a;
       white-space: nowrap;
     }
-    .ls-node.ls-locked .ls-node-name { color: rgba(200,210,235,0.5); }
+    .ls-node.ls-locked .ls-node-name {
+      color: rgba(214,222,236,0.55);
+      box-shadow: inset 0 0 0 2px rgba(96,104,120,0.7), 0 0 0 2px rgba(10,7,3,0.9);
+    }
     .ls-node-best {
-      display: block;
-      margin-top: 1px;
+      display: inline-block;
+      margin-top: 5px;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
       font-size: 10px;
-      letter-spacing: 0.04em;
-      color: #ffd86a;
-      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
-      font-family: 'Nunito', sans-serif;
-      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: #f3d383;
+      text-shadow: 1px 1px 0 #1a1006;
     }
     .ls-node-stars {
       display: flex;
-      gap: 2px;
+      gap: 3px;
       justify-content: center;
-      margin-top: 2px;
+      margin-top: 5px;
     }
     .ls-node-stars .ls-star {
-      font-size: 14px;
-      color: rgba(255,255,255,0.25);
+      font-size: 15px;
+      line-height: 1;
+      color: rgba(240,230,200,0.2);
+      text-shadow: 1px 1px 0 #14100a;
     }
     .ls-node-stars .ls-star.earned {
-      color: #ffc832;
-      text-shadow: 0 0 6px rgba(255,210,70,0.9);
+      color: #ffcb3d;
+      text-shadow: 1px 1px 0 #6b4a12;
     }
 
-    /* ── Endless — clean pill, bottom-right ── */
+    /* ── Difficulty — a row of iron-bound oak tabs, bottom-center ── */
+    .ls-difficulty {
+      position: absolute;
+      bottom: 26px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: stretch;
+      gap: 4px;
+      padding: 6px 8px;
+      background: linear-gradient(180deg, #3a2710, #241706);
+      box-shadow: inset 0 0 0 3px #8a6a2c, 0 0 0 3px #120d06, 0 6px 0 rgba(0,0,0,0.45);
+      z-index: 7;
+      font-family: 'Cinzel', Georgia, serif;
+    }
+    .ls-difficulty .lsd-label {
+      align-self: center;
+      color: #c8a768;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      padding: 0 10px;
+    }
+    .ls-difficulty .lsd-btn {
+      padding: 7px 17px;
+      border: none;
+      border-radius: 0;
+      cursor: pointer;
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      color: #d9c79c;
+      background: rgba(0,0,0,0.28);
+      box-shadow: inset 0 0 0 2px rgba(138,106,44,0.35);
+      transition: transform 0.1s steps(2), color 0.1s;
+    }
+    .ls-difficulty .lsd-btn:hover { color: #fff8e2; }
+    .ls-difficulty .lsd-btn:active { transform: translateY(2px); }
+    .ls-difficulty .lsd-btn[data-diff="easy"].active {
+      background: linear-gradient(180deg, #63b83f 0%, #2d7a18 100%);
+      color: #fff; box-shadow: inset 0 0 0 2px #1d5410, inset 0 3px 0 rgba(255,255,255,0.22);
+    }
+    .ls-difficulty .lsd-btn[data-diff="normal"].active {
+      background: linear-gradient(180deg, #d9a92f 0%, #96700f 100%);
+      color: #fff; box-shadow: inset 0 0 0 2px #654a08, inset 0 3px 0 rgba(255,255,255,0.22);
+    }
+    .ls-difficulty .lsd-btn[data-diff="hard"].active {
+      background: linear-gradient(180deg, #d94e28 0%, #8a2612 100%);
+      color: #fff; box-shadow: inset 0 0 0 2px #5c1a0c, inset 0 3px 0 rgba(255,255,255,0.22);
+    }
+
+    /* ── Endless — an obsidian gate, bottom-right ── */
     .ls-endless-btn {
       position: absolute;
-      bottom: 22px;
-      right: 26px;
+      bottom: 26px; right: 28px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 1px;
-      padding: 9px 22px;
-      background: linear-gradient(180deg, #7a3ac8 0%, #3a1080 100%);
-      border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 14px;
-      font-family: 'Fredoka One', sans-serif;
-      font-size: 15px;
-      letter-spacing: 0.03em;
-      color: #fff;
+      gap: 2px;
+      padding: 10px 22px;
+      background: linear-gradient(180deg, #52218f 0%, #2a0d5c 100%);
+      box-shadow: inset 0 0 0 3px #9a6ede, inset 0 4px 0 rgba(255,255,255,0.16), 0 0 0 3px #120d06, 0 6px 0 rgba(0,0,0,0.5);
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 900;
+      font-size: 14px;
+      letter-spacing: 0.08em;
+      color: #f0e6ff;
       cursor: default;
-      z-index: 6;
-      box-shadow: 0 6px 16px rgba(0,0,0,0.45);
-      text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+      z-index: 7;
+      text-shadow: 1px 1px 0 #1a0630;
+      transition: transform 0.1s steps(2);
     }
-    .ls-endless-btn.unlocked {
-      cursor: pointer;
-      box-shadow: 0 6px 16px rgba(0,0,0,0.45), 0 0 16px rgba(150,80,220,0.45);
-    }
-    .ls-endless-btn.unlocked:hover { filter: brightness(1.12); transform: translateY(-2px); }
-    .ls-endless-btn.unlocked:active { transform: translateY(0); }
-    .ls-endless-btn.ls-locked { opacity: 0.5; filter: grayscale(0.5); }
+    .ls-endless-btn.unlocked { cursor: pointer; }
+    .ls-endless-btn.unlocked:hover { filter: brightness(1.14); }
+    .ls-endless-btn.unlocked:active { transform: translateY(3px); }
+    .ls-endless-btn.ls-locked { opacity: 0.5; filter: grayscale(0.6); }
 
 
     /* ── LEVEL COMPLETE MODAL ── */
@@ -1158,26 +1392,33 @@
     .stats-ach.locked { opacity: 0.45; filter: grayscale(0.6); }
     .stats-ach .sa-icon { font-size: 18px; }
     .stats-ach .sa-name { color: #2a1400; font-weight: 900; }
-    /* Records button on level-select — glass pill, top-left (clear of close + title) */
+    /* Records button on level-select — iron-bound oak tab, bottom-left */
     .ls-records-btn {
       position: absolute;
-      top: 26px;
-      left: 26px;
-      padding: 9px 16px;
-      background: rgba(20,32,60,0.72);
-      border: 1px solid rgba(255,255,255,0.14);
-      border-radius: 22px;
-      backdrop-filter: blur(8px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-      font-family: 'Fredoka One', sans-serif;
-      font-size: 13px;
-      letter-spacing: 0.06em;
-      color: #cdd6ee;
+      bottom: 26px;
+      left: 28px;
+      padding: 10px 18px;
+      border: none;
+      border-radius: 0;
+      background: linear-gradient(180deg, #3a2710, #241706);
+      box-shadow: inset 0 0 0 3px #8a6a2c, 0 0 0 3px #120d06, 0 6px 0 rgba(0,0,0,0.45);
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      color: #d9c79c;
+      text-shadow: 1px 1px 0 #14100a;
       cursor: pointer;
       z-index: 7;
+      transition: transform 0.1s steps(2), color 0.1s;
     }
-    .ls-records-btn:hover { color: #fff; border-color: rgba(255,255,255,0.3); }
-    .ls-records-btn:active { transform: scale(0.96); }
+    .ls-records-btn:hover { color: #fff8e2; }
+    .ls-records-btn:active { transform: translateY(3px); }
+    /* Narrow windows: the centered difficulty pill spans most of the bottom —
+       tuck Records back into the top-left (title is clamped small there, so it's clear) */
+    @media (max-width: 900px) {
+      .ls-records-btn { bottom: auto; top: 16px; left: 16px; }
+    }
 
     /* ── WAVE STARS OVERLAY ── */
     #wave-stars {
@@ -1257,8 +1498,16 @@
       z-index: 10;
     }
     .card-lock-icon { font-size: 20px; line-height: 1; }
-    .card-lock-text { font-size: 9px; font-weight: 900; color: rgba(255,200,140,0.7); letter-spacing: 0.05em; font-family: 'Nunito', sans-serif; }
-    .build-card.locked { opacity: 0.48; cursor: default; }
+    /* Full alpha, brighter tint. At 0.7 alpha this text was ALSO being dimmed by the
+       card's own opacity below, compositing to roughly 2.4:1 against the panel — under
+       the 4.5:1 WCAG AA needs for 9px text, so the "Wave N" you're waiting for was the
+       least readable thing on the card. Now ~14:1. */
+    .card-lock-text { font-size: 9px; font-weight: 900; color: #ffd9a8; letter-spacing: 0.05em; font-family: 'Nunito', sans-serif; }
+    /* Dim the ARTWORK, not the lock overlay. Putting opacity on the card itself dimmed
+       its own lock badge too, which is the one part that must stay readable while the
+       card is unavailable. */
+    .build-card.locked { cursor: default; }
+    .build-card.locked > *:not(.card-lock) { opacity: 0.48; }
     .build-card.locked:hover { transform: none !important; box-shadow: none !important; background: rgba(255,255,255,0.06) !important; }
     .build-card.cap-blocked { opacity: 0.38; cursor: not-allowed; outline: 1px solid rgba(255,80,50,0.4); }
     .build-card.cap-blocked:hover { transform: none !important; box-shadow: none !important; }
@@ -2457,6 +2706,8 @@
 <body>
 
   <canvas id="c"></canvas>
+  <!-- Subtle vignette over the 3D view — adds depth without touching the voxel look -->
+  <div id="vignette"></div>
 
   <!-- TOP HUD -->
   <div id="hud">
