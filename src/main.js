@@ -70,7 +70,8 @@ const CFG = {
                   shootRange: 7.0, shootRate: 0.32, shootDmg: 12, aoe: 1.3 },                                              // chunkier health, longer-range boulders
   },
   SPAWN_INTERVAL: 1.15, // base; decreases with wave in updateSpawner
-  MAX_DEFENDERS: 14,    // base unit cap; +1 per completed wave, max 26
+  MAX_DEFENDERS: 14,
+  MAX_LIVE_ENEMIES: 200,  // spawner holds above this so endless can't unbound the entity count    // base unit cap; +1 per completed wave, max 26
   // ── Upgrade multipliers per level ─────────────────────────────────────────
   // [dmg, range, rate, hp] multipliers applied each time a unit upgrades
   UPGRADE_STATS: {
@@ -347,7 +348,11 @@ let currentLevel    = null;       // LEVELS entry while playing a level; null in
 let levelStarsEarned = 0;         // stars accumulated across the current level's waves (0-9)
 let levelWaveStars  = [];         // per-wave star counts for the current level (0-3 each); drives level star rating
 let levelProgress   = {};         // { "1": { unlocked, bestStars, completed, bestTimeMs, bestKills }, ... } — loaded from localStorage
-let _levelCompleteTimer = null;   // setTimeout handle for the delayed level-complete modal; cleared on mode switch
+let _levelCompleteTimer = null;
+// Payload for a level completion whose modal was deferred. Kept so an interrupted
+// modal (e.g. the player opens Level Select during the 1800 ms delay) can be restored
+// rather than silently lost along with the ability to advance the level.
+let _pendingLevelComplete = null;   // setTimeout handle for the delayed level-complete modal; cleared on mode switch
 
 // ─────────────────────────────────────────────
 //  PERSISTENCE — centralized save/load with schema versioning
@@ -3677,7 +3682,7 @@ function _pushEnemy(g, orcType, legL, legR, body, head, hpYOffset, chosenPath, a
     });
   }
   scene.add(g);
-  const baseHp = Math.round((isElite ? type.hp * 2 : type.hp) * difficultyMult.hp);
+  const baseHp = Math.round((isElite ? type.hp * 2 : type.hp) * difficultyMult.hp * _endlessHpScale());
   orcs.push({
     group: g, type: orcType, isElite,
     path: chosenPath,
@@ -4183,7 +4188,7 @@ function spawnGenericOrc(orcType, chosenPath) {
   g.scale.setScalar(eliteSc);
   g.position.set(chosenPath[0][0], 0, chosenPath[0][1]);
   scene.add(g);
-  const baseHp = Math.round((isElite ? type.hp * 2 : type.hp) * difficultyMult.hp);
+  const baseHp = Math.round((isElite ? type.hp * 2 : type.hp) * difficultyMult.hp * _endlessHpScale());
   orcs.push({
     group: g, type: orcType, isElite,
     path: chosenPath,
@@ -9391,8 +9396,13 @@ function dealDamage(orc, dmg, attacker = null) {
     const counterDmg = CFG.ORC_TYPES[orc.type]?.defDmg ?? 1;
     if (counterDmg > 0) dealDefenderDamage(attacker, counterDmg);
     // Melee hit → immediately snap into fight state so enemy turns to engage the attacker.
-    // Skip if castle-attacking (that block never reaches fightingDefender handler).
-    if (!orc.attackingCastle &&
+    // Skip if castle-attacking OR wall-blocked: BOTH of those branches `continue` before
+    // the fightingDefender handler ever runs (the blockedByWall block spans ~6598-6991 and
+    // ends in a continue). The castle case was already excluded; the wall case was not, so
+    // a melee defender that struck a wall-blocked orc handed it an attack slot the orc
+    // could never use and never release — permanently consuming one of that defender's
+    // maxSlots and, once enough leaked, making it unattackable by anything real.
+    if (!orc.attackingCastle && !orc.blockedByWall &&
         (attacker.type === 'knight' || attacker.type === 'swordsman' || attacker.type === 'spearman')) {
       const curF = orc.fightingDefender;
       const curIsMelee = curF && (curF.type === 'knight' || curF.type === 'swordsman' || curF.type === 'spearman');
@@ -10772,8 +10782,27 @@ function buildSpawnQueue(waveNum) {
   return q;
 }
 
+// Endless-only per-enemy escalation. Enemy HP never scaled with wave at all, and every
+// other dial flatlines early (rageMultiplier caps at 2.0 by wave 30, siege elite chance
+// caps at wave 25), so past ~30 endless got harder ONLY by spawning more identical
+// enemies — more clicking, not more difficulty. +4% HP per wave beyond 15, capped at 3x.
+// Campaign levels are untouched (they never exceed wave 15). This is the tuning dial if
+// endless feels too soft or too punishing late.
+function _endlessHpScale() {
+  if (!currentLevel || currentLevel.id !== 'endless') return 1;
+  return Math.min(3.0, 1 + Math.max(0, wave - 15) * 0.04);
+}
+
 function updateSpawner(dt) {
   if (!waveActive || spawnQueue.length === 0) return;
+  // Soft cap on LIVE enemies. buildSpawnQueue grows without bound in endless — wave 100
+  // generates 630 enemies, wave 200 about 1295 — and nothing paced them, so a held line
+  // could pile up thousands of entities and drown the renderer. Holding the QUEUE rather
+  // than dropping enemies means every one still arrives, just not all at once: the wave
+  // is identical in content and difficulty, only the burst rate is bounded.
+  let _live = 0;
+  for (const o of orcs) if (o.alive) _live++;
+  if (_live >= CFG.MAX_LIVE_ENEMIES) return;
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     const type = spawnQueue[spawnQueue.length - 1];
@@ -10944,10 +10973,19 @@ function checkWaveEnd() {
     // Store the handle so mode-switches / level-select can cancel this before it fires.
     const _lvlSnapshot = currentLevel;
     if (_levelCompleteTimer) clearTimeout(_levelCompleteTimer);
+    // Remember what the modal was going to say. showLevelSelect() cancels this timer,
+    // so browsing the map during the 1800 ms delay used to DESTROY the completion:
+    // the modal never appeared, and because checkWaveEnd returns here without
+    // re-enabling Start Wave (and bails on !waveActive next time), the finished level
+    // could not be advanced from the play screen at all. Holding the payload lets
+    // ls-close put it back.
+    _pendingLevelComplete = { lvl: _lvlSnapshot, stars: levelStarsEarned, isNewRecord,
+                              unlockedNext, info: { runMs, prevBestTime, isNewBestTime } };
     _levelCompleteTimer = setTimeout(() => {
       _levelCompleteTimer = null;
       // Re-check: player may have exited to level-select or switched modes during the delay
       if (!currentLevel || currentLevel !== _lvlSnapshot) return;
+      _pendingLevelComplete = null;
       showLevelComplete(_lvlSnapshot, levelStarsEarned, isNewRecord, unlockedNext, {
         runMs, prevBestTime, isNewBestTime,
       });
@@ -11658,6 +11696,7 @@ function startLevel(id) {
   _levelRunStartMs = _simClockMs;       // start clock for "best time" (simulated, not wall)
   _levelRunActive  = true;
   _levelRunDifficulty = currentDifficulty;
+  _pendingLevelComplete = null;   // never carry a stale completion into a new run
   currentLevel = lvl;
   hideLevelSelect();
   _resetRunState();
@@ -14986,16 +15025,28 @@ function _meRestoreObject(captured) {
 
 // Rebuild PATHS[0/1/2] and PATH_SET from the editor's path tile data
 function _meRebuildPaths() {
+  // PATHS and PATH_SET must move together. The old version wrote PATHS
+  // unconditionally but guarded PATH_SET on "the editor has painted something",
+  // so with no editor paths — after Clear All, or loading a map saved without
+  // painted lanes — all three PATHS became [] while PATH_SET still held the
+  // previous map's keys. Enemies then had no route at all: Test Play spawned
+  // nothing and the map looked broken with no error to explain it.
+  if (!_mePaths.some(p => p.length > 0)) {
+    // No painted lanes — fall back to the active layout's routes rather than
+    // leaving the game with none. Mirrors what applyLayout() installs.
+    const def = LAYOUT_WAYPOINTS[activeLayoutIdx] || LAYOUT_WAYPOINTS[0];
+    PATHS[0] = expandPath(def.a);
+    PATHS[1] = expandPath(def.b);
+    PATHS[2] = expandPath(def.c);
+    PATH_SET = new Set([...PATHS[0], ...PATHS[1], ...PATHS[2]].map(([c, r]) => `${c},${r}`));
+    return;
+  }
   const allPathKeys = new Set();
   for (let pi = 0; pi < 3; pi++) {
     PATHS[pi] = _mePaths[pi].slice();
     _mePaths[pi].forEach(([c,r]) => allPathKeys.add(`${c},${r}`));
   }
-  // Merge with pre-existing PATH_SET (layout paths) — don't wipe game paths
-  // Actually replace PATH_SET entirely with editor paths if any exist, otherwise keep layout
-  if (_mePaths.some(p => p.length > 0)) {
-    PATH_SET = allPathKeys;
-  }
+  PATH_SET = allPathKeys;
 }
 
 // Erase only a placed scenery OBJECT at a tile (not tile type)
@@ -15139,11 +15190,28 @@ function _meClearAll() {
   // the last reference without disposing stranded each editor object's GPU buffers
   // for the life of the page, so place-objects → load-map → repeat grew VRAM
   // monotonically until the context dropped.
-  for (const item of _meItems) { scene.remove(item.group); disposeGroup(item.group); }
+  // Release the tile flag as well as the mesh. Every builder marks its tile
+  // cell.type = 'scenery' (unbuildable), and every single-object erase path in this
+  // file restores it — but Clear All did not, so the flags outlived the objects.
+  // _meLoadMap starts with _meClearAll(), which meant map B inherited map A's
+  // invisible unbuildable tiles, accumulating with every load.
+  const _freeSceneryTile = (col, row) => {
+    const cell = grid[`${col},${row}`];
+    if (cell && cell.type === 'scenery') cell.type = 'grass';
+  };
+  for (const item of _meItems) {
+    _freeSceneryTile(item.col, item.row);
+    scene.remove(item.group); disposeGroup(item.group);
+  }
   _meItems.length = 0;
 
   // Remove all initial scenery (trees, rocks, buildings, wells, border trees)
   for (const item of initialScenery) {
+    // initialScenery entries carry col/row; fall back to the group position for any
+    // that were built without them.
+    const c = item.col ?? Math.round(item.group?.position?.x ?? NaN);
+    const r = item.row ?? Math.round(item.group?.position?.z ?? NaN);
+    if (Number.isFinite(c) && Number.isFinite(r)) _freeSceneryTile(c, r);
     scene.remove(item.group);
     disposeGroup(item.group);
   }
@@ -17828,6 +17896,14 @@ document.getElementById('ls-close')?.addEventListener('click', () => {
     if (elBtnStart) elBtnStart.disabled = _lsRunSnapshot.startDisabled;
     gameSpeed    = _lsRunSnapshot.gameSpeed;
     _lsRunSnapshot = null;
+  }
+  // A level finished while the map was open: showLevelSelect cancelled its pending
+  // modal. Put it back rather than stranding a completed level with Start Wave
+  // disabled and no way to advance.
+  if (_pendingLevelComplete && currentLevel === _pendingLevelComplete.lvl) {
+    const p = _pendingLevelComplete;
+    _pendingLevelComplete = null;
+    showLevelComplete(p.lvl, p.stars, p.isNewRecord, p.unlockedNext, p.info);
   }
   if (gameSpeed === 0) gameSpeed = 1;
 });
