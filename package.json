@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "diag": "bash scripts/run-diagnostic.sh"
+    "diag": "bash scripts/run-diagnostic.sh",
+    "smoke": "bash scripts/run-smoke.sh"
   },
   "dependencies": {
     "three": "^0.169.0"
