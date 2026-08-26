@@ -361,7 +361,12 @@ const CURRENT_SAVE_VERSIONS = {
   td_level_progress:   1,
   td_achievements:     1,
   td_difficulty:       1,
-  td_endless_best:     1,
+  // Endless records are stored per difficulty as td_endless_best_<diff>, so the bare
+  // key below was never consulted by loadSave/saveSave and those records were
+  // silently unversioned. Register the three real keys.
+  td_endless_best_easy:   1,
+  td_endless_best_normal: 1,
+  td_endless_best_hard:   1,
   td_saved_maps:       1,
   td_studio_objects:   1,
   tdHighScore:         1,
@@ -492,11 +497,19 @@ function saveEndlessBest(diff, record) {
 }
 function maybeUpdateEndlessBest() {
   if (!currentLevel || currentLevel.id !== 'endless') return null;
-  const prev = loadEndlessBest(currentDifficulty);
+  // Key off the difficulty the RUN STARTED on, not the live setting. Difficulty is
+  // switchable mid-run from the ESC menu, so reading currentDifficulty here let a
+  // run played entirely on Easy be filed as a Hard record by flipping the toggle on
+  // the final wave — and the tier that actually earned it never got the record. This
+  // is the same defect already fixed for story-level bestTimes; the endless path was
+  // missed. Note BOTH sides must use the same key, or a load/compare would read one
+  // tier's record and write another's.
+  const diffKey = _levelRunDifficulty || currentDifficulty;
+  const prev = loadEndlessBest(diffKey);
   const cur  = { wave, kills, ts: Date.now() };
   const isNew = !prev || cur.wave > prev.wave || (cur.wave === prev.wave && cur.kills > (prev.kills || 0));
-  if (isNew) saveEndlessBest(currentDifficulty, cur);
-  return { isNew, prev, cur };
+  if (isNew) saveEndlessBest(diffKey, cur);
+  return { isNew, prev, cur, diffKey };
 }
 
 // ── Level run timer (for "best clear time" per story level) ──────────────────
@@ -7400,6 +7413,20 @@ function updateOrcs(dt, t) {
             o.chasingDefender  = null;
             o.defAttackTimer   = 0;
             o.swingDamageReady = false; o.swingPhase = 0; o.swingHit = false;
+          } else {
+            // Target is at maxSlots. Without this branch the enemy froze FOREVER:
+            // this arm of the `if` performs no movement, and the block ends in an
+            // unconditional `continue`, so a refused chaser never advanced along the
+            // path, never re-targeted, and never returned to it. It could not be
+            // killed out of the state either, because melee defenders prefer their
+            // `attackedBy` (the slot holders) over findClosestOrc — so the frozen orc
+            // was never anyone's target. checkWaveEnd bails on `orcs.some(o => o.alive)`,
+            // so a single wedged enemy hangs the wave permanently.
+            // Caught empirically first: a wave-25 coverage run sat at 19 enemies alive,
+            // 0 escaped, 0 killed for a full 45s. Elite-heavy waves fill slots faster,
+            // which is why late waves tripped it and earlier ones usually didn't.
+            o.chasingDefender = null;
+            returnToPath(o);
           }
         } else {
           // Move directly toward target — determined charge
@@ -10793,6 +10820,13 @@ function checkWaveEnd() {
   }
   SND.waveComplete();
 
+  // Snapshot the castle's TRUE end-of-wave HP before the Last Stand restore below can
+  // raise it. The star check reads castleHp, so restoring first meant a wave that
+  // ground the castle down to 1 HP could be awarded the "castle took no damage" star
+  // once the restore lifted it back above waveStartHp. Regression introduced with the
+  // Last Stand fix itself.
+  const hpForStars = castleHp;
+
   // Surviving Last Stand. The countdown's only exit was triggerGameOver() when it hit
   // zero — nothing anywhere cancelled it — so clearing the wave did NOT save you: the
   // banner promised "30 seconds, defenders deal 3× damage!" and then killed you at t=30
@@ -10814,7 +10848,7 @@ function checkWaveEnd() {
   }
 
   // Feature 3: star rating — 3 independent criteria
-  const starNoDmg   = castleHp >= waveStartHp;                               // castle took 0 damage
+  const starNoDmg   = hpForStars >= waveStartHp;   // pre-restore HP — see hpForStars above                               // castle took 0 damage
   const starNoLoss  = waveDefDeaths === 0;                                    // no defenders lost
   const timeLimit   = (20 + wave * 10) * (wave % 5 === 0 ? 1.4 : 1.0);      // seconds; siege waves get +40%
   const starFast    = (_simClockMs - waveStartTime) / 1000 <= timeLimit;     // cleared in time (simulated seconds)
