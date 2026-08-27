@@ -8184,6 +8184,10 @@ function updateDefHit(d, dt) {
 // ─────────────────────────────────────────────
 //  BUILD WALL (can go on path or grass)
 // ─────────────────────────────────────────────
+// True while _buildPreviewGroup constructs a display-only unit for the Studio unit lab.
+// Those builders share the real construction path, so without this the preview credited
+// the persisted 'wallsBuilt' achievement stat just for opening the lab.
+let _previewBuild = false;
 function buildWall(col, row) {
   const g = new THREE.Group();
   // Foundation slab
@@ -8241,7 +8245,7 @@ function buildWall(col, row) {
   defenders.push({ type: 'wall', group: g, col, row, hpBar,
     hp: CFG.STATS.wall.hp, maxHp: CFG.STATS.wall.hp, animScale: 0, spawnTime: performance.now(), alive: true });
   _rebuildWallCache();
-  _bumpStat('wallsBuilt', 1);
+  if (!_previewBuild) _bumpStat('wallsBuilt', 1);
 }
 
 // ─────────────────────────────────────────────
@@ -14471,6 +14475,22 @@ function _worldDelete() {
   disposeGroup(item.group);
   const idx = initialScenery.indexOf(item);
   if (idx !== -1) initialScenery.splice(idx, 1);
+  // Removing the mesh is only a third of the job — the map-editor erase path does all
+  // three, and skipping them here corrupted the LIVE game in ways that survived exitStudio:
+  //  1. staticObstacles kept the collider, so units walked around an invisible trunk;
+  //  2. the tile stayed cell.type = 'scenery', permanently unbuildable;
+  //  3. _biomeTreeSpots kept the spot, so the next applyBiome() re-created the deleted
+  //     tree in place — the deletion silently undid itself.
+  const col = item.col ?? Math.round(item.group?.position?.x ?? NaN);
+  const row = item.row ?? Math.round(item.group?.position?.z ?? NaN);
+  if (Number.isFinite(col) && Number.isFinite(row)) {
+    const si = staticObstacles.findIndex(o => Math.abs(o.x - col) < 0.5 && Math.abs(o.z - row) < 0.5);
+    if (si !== -1) staticObstacles.splice(si, 1);
+    const cell = grid[`${col},${row}`];
+    if (cell && cell.type === 'scenery') cell.type = 'grass';
+    const bi = _biomeTreeSpots.findIndex(t => t.col === col && t.row === row);
+    if (bi !== -1) _biomeTreeSpots.splice(bi, 1);
+  }
 }
 
 // World editor event listeners
@@ -14675,6 +14695,8 @@ function _unitPreviewInit() {
 function _buildPreviewGroup(type, cat) {
   if (cat === 'defender') {
     const before = defenders.length;
+    _previewBuild = true;
+    try {
     if      (type === 'wall')      buildWall(0, 0);
     else if (type === 'tower')     buildTower(0, 0);
     else if (type === 'catapult')  buildCatapult(0, 0);
@@ -14685,8 +14707,14 @@ function _buildPreviewGroup(type, cat) {
     if (defenders.length > before) {
       const def = defenders.pop();
       scene.remove(def.group);
+      // buildWall() already ran _rebuildWallCache() while this preview was still in
+      // `defenders`, so the cache holds a ghost wall at (0,0) pointing at the object we
+      // just popped. _wallBlocksPath consults that cache, so the ghost blocked line of
+      // fire and enemy pathing on the real board. Rebuild now that it is gone.
+      if (def.type === 'wall') _rebuildWallCache();
       return def.group;
     }
+    } finally { _previewBuild = false; }
   } else {
     const before  = orcs.length;
     const dPath   = [[0, 0]];
@@ -16698,7 +16726,11 @@ function _cmpOutcome(a, b) {
         const [, count = 1] = Array.isArray(e) ? e : [e, 1];
         return s + count;
       }, 0);
-      const totalSpawned = Math.min(totalSpawnedRaw, 22);
+      // Must match ARENA_SPAWN_CAP below (22 PER LANE), not a bare 22. Hardcoding 22 meant a
+      // 3-lane battle spawned 66 enemies but the watcher declared it finished once 22 were
+      // resolved — it returned mid-fight, before most defenders had engaged. That is what
+      // made the diagnostic's 3-lane wave_sim section report 0 kills off 465g of defenders.
+      const totalSpawned = Math.min(totalSpawnedRaw, 22 * _arenaLanes);
 
       // Spawn enemies with column stagger — cap scales with lane count (22 per lane)
       // so multi-lane battles can handle full wave compositions without truncation.
@@ -17378,14 +17410,28 @@ function _cmpOutcome(a, b) {
     _modeTransEl.classList.add('fading');
     setTimeout(() => {
       fn();
-      // Two rAF so the browser has painted the new scene before fading back in
-      requestAnimationFrame(() => requestAnimationFrame(() => {
+      // The flag MUST be cleared even if rAF never runs. requestAnimationFrame is
+      // suspended in a backgrounded or minimised tab, and clearing _modeFlashing only
+      // inside the double-rAF meant that a mode switch started just before the tab lost
+      // focus left the flag stuck true forever — after which the guard above silently
+      // swallowed EVERY later mode switch, with no error, until the page was reloaded.
+      // (enterTestMode already swaps to a MessageChannel ticker for exactly this reason,
+      // so the rAF-stalls-in-background hazard was known; this path just missed it.)
+      let _settled = false;
+      const _finish = () => {
+        if (_settled) return;
+        _settled = true;
         _modeTransEl.classList.remove('fading');
         _modeFlashing = false;
-      }));
+      };
+      // Two rAF so the browser has painted the new scene before fading back in…
+      requestAnimationFrame(() => requestAnimationFrame(_finish));
+      // …and a wall-clock fallback so a hidden tab can never wedge the switcher.
+      setTimeout(_finish, 400);
     }, 210);
   }
 
+  let _preTestGameSpeed = 1;   // restored by exitTestMode; the arena slider overwrites gameSpeed
   function enterTestMode() {
     // Stop the real-game spawner so no enemies spawn on real paths while in test mode
     waveActive = false;
@@ -17395,7 +17441,16 @@ function _cmpOutcome(a, b) {
 
     // Dismiss any in-flight overlays so they don't show over the test arena
     _dismissAllOverlays();
+    _preTestGameSpeed = gameSpeed || 1;
     lastStandActive = false; lastStandTimer = 0;
+    // Clear the loss flag too. The whole simulation — updateOrcs/updateDefenders AND the
+    // TEST.battle / _testWait watchers that resolve their promises — lives inside
+    // `if (!gameOver)` in gameLoop (12692-12798). Entering the arena after a real-game
+    // loss therefore produced a frozen arena where enemies stood still, nothing fired,
+    // and every `await TEST.battle(...)` hung forever — which also left _scriptRunning
+    // stuck true so the Run button stayed disabled for the rest of the session.
+    // _resetRunState (via Retry) was the only thing that cleared it.
+    gameOver = false;
 
     // Cancel any pending rAF so we can switch to setTimeout-based loop (works in background tabs)
     if (_gameLoopRafId) { cancelAnimationFrame(_gameLoopRafId); _gameLoopRafId = null; }
@@ -17477,6 +17532,15 @@ function _cmpOutcome(a, b) {
     _mcTickEnabled = false; // stop MessageChannel ticker
     _gameLoopRafId = requestAnimationFrame(gameLoop); // restart rAF chain
     castleSceneActive = false;
+    // Arena state must not follow the player back. Last Stand can be triggered inside the
+    // arena; leaking it meant the real game silently ran at 3x defender damage and then
+    // fired a spurious game-over ~30s later. gameSpeed is stomped on entry by the arena's
+    // own speed slider and was never put back, so returning could leave the game running
+    // at the arena's rate (or paused at 0, looking frozen).
+    lastStandActive = false; lastStandTimer = 0;
+    elLastStand?.classList.remove('active');
+    elLastStandTimer?.classList.remove('active');
+    gameSpeed = _preTestGameSpeed || 1;
     _arenaLanes = 1;
     _arenaLanePaths = [];
     _laneRR = 0;
@@ -17497,7 +17561,17 @@ function _cmpOutcome(a, b) {
     castleHp = CFG.CASTLE_MAX_HP;
     updateCastleHPBar(); updateCastleHPMesh();
 
-    applyLayout(savedTestLayoutIdx);
+    // Only restore the STOCK layout when the player has no painted lanes. Every other
+    // applyLayout call site guards on this; this one did not, so returning from the arena
+    // on a custom map repainted stock roads over the player's map and left PATHS and
+    // _mePaths permanently divergent — after which the editor-path guards elsewhere froze
+    // the map on a route they never drew.
+    if (_mePaths.some(p => p.length > 0)) {
+      activeLayoutIdx = savedTestLayoutIdx;
+      _meRebuildPaths();
+    } else {
+      applyLayout(savedTestLayoutIdx);
+    }
 
     // Restore UNLOCKED to baseline + whatever the player had earned by current wave
     // (enterTestMode force-unlocks everything for sandbox; we must undo that here)
