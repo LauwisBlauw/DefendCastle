@@ -3,3 +3,8 @@ dist/
 .DS_Store
 *.log
 .claude/
+
+# Godot port
+godot/.godot/
+godot/android/
+*.import

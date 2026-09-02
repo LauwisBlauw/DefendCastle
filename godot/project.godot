@@ -1,0 +1,30 @@
+; DefendCastle — Godot 4 port (vertical slice)
+; Settings chosen for the stated target: mobile / console export.
+config_version=5
+
+[application]
+config/name="DefendCastle"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.4", "Forward Plus")
+
+[autoload]
+Cfg="*res://scripts/config.gd"
+Waves="*res://scripts/waves.gd"
+
+[display]
+; 1280x720 base with canvas_items stretch: scales cleanly to phone and TV panels
+; without the level-select-style reflow problem the web build had.
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[input_devices]
+pointing/emulate_mouse_from_touch=true
+
+[rendering]
+; Voxel art: nearest filtering keeps the hard pixel edges the web build relies on.
+textures/canvas_textures/default_texture_filter=0
+renderer/rendering_method="forward_plus"
+renderer/rendering_method.mobile="mobile"
