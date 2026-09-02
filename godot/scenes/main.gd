@@ -32,6 +32,7 @@ func _ready() -> void:
     _build_ground()
     _build_castle()
     _place_camera()
+    _build_lighting()
     _refresh_hud()
 
 func _build_ground() -> void:
@@ -74,23 +75,60 @@ func _build_castle() -> void:
 func _place_camera() -> void:
     var cam := Camera3D.new()
     cam.fov = 55
-    add_child(cam)   # must be in the tree BEFORE look_at(); otherwise Godot refuses it
-    cam.position = Vector3(30, 34, 62)
-    cam.look_at(Vector3(34, 0, 27), Vector3.UP)
+    add_child(cam)   # must be in the tree BEFORE look_at(); Godot refuses it otherwise
+    _frame_board(cam)
+    get_viewport().size_changed.connect(func(): _frame_board(cam))
+
+## Frame the whole board. The first version computed a distance from the board size
+## and the fov — which under-shot, because perspective makes the NEAR edge far wider on
+## screen than the centre distance implies, so the bottom and sides bled off frame.
+## This instead positions the camera and then VERIFIES by projecting the four ground
+## corners, backing off until they all land inside the viewport. Self-correcting, so it
+## holds for any aspect ratio — which is the whole point on phones and TVs.
+func _frame_board(cam: Camera3D) -> void:
+    const PITCH_DEG := 58.0        # steeper than 54: less near/far spread, reads flatter
+    const PAD := 0.04              # keep corners this far inside the edges (fraction)
+    var center := Vector3(Cfg.GRID_W * 0.5, 0.0, Cfg.GRID_H * 0.5)
+    var pitch := deg_to_rad(PITCH_DEG)
+    var corners := [
+        Vector3(0, 0, 0), Vector3(Cfg.GRID_W, 0, 0),
+        Vector3(0, 0, Cfg.GRID_H), Vector3(Cfg.GRID_W, 0, Cfg.GRID_H),
+    ]
+    var vp: Vector2 = get_viewport().get_visible_rect().size
+    var dist: float = maxf(Cfg.GRID_W, Cfg.GRID_H) * 0.8   # starting guess
+    for _i in range(40):                                    # converges in a handful
+        cam.position = center + Vector3(0.0, dist * sin(pitch), dist * cos(pitch))
+        cam.look_at(center, Vector3.UP)
+        cam.force_update_transform()
+        var fits := true
+        for c in corners:
+            if cam.is_position_behind(c):
+                fits = false
+                break
+            var sp: Vector2 = cam.unproject_position(c)
+            if sp.x < vp.x * PAD or sp.x > vp.x * (1.0 - PAD) \
+            or sp.y < vp.y * PAD or sp.y > vp.y * (1.0 - PAD):
+                fits = false
+                break
+        if fits:
+            return
+        dist *= 1.06
+
+func _build_lighting() -> void:
     var sun := DirectionalLight3D.new()
     sun.rotation_degrees = Vector3(-52, -35, 0)
     sun.light_energy = 1.15
     sun.shadow_enabled = true
     add_child(sun)
-    var amb := WorldEnvironment.new()
+    var we := WorldEnvironment.new()
     var env := Environment.new()
     env.background_mode = Environment.BG_COLOR
     env.background_color = Color(0.42, 0.66, 0.85)
     env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
     env.ambient_light_color = Color(0.60, 0.72, 0.85)
     env.ambient_light_energy = 0.85
-    amb.environment = env
-    add_child(amb)
+    we.environment = env
+    add_child(we)
 
 func start_wave() -> void:
     if _wave_active:
