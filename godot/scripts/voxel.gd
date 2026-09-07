@@ -12,13 +12,40 @@ static var _mat_cache: Dictionary = {}
 static var _box_cache: Dictionary = {}
 
 static func mat(color: Color) -> StandardMaterial3D:
-    var key := color.to_rgba32()
+    var key := "f%d" % color.to_rgba32()
     if _mat_cache.has(key):
         return _mat_cache[key]
     var m := StandardMaterial3D.new()
     m.albedo_color = color
     m.roughness = 0.9
     m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED  # flat voxel look
+    _mat_cache[key] = m
+    return m
+
+## Glowing parts (eyes, crystals, fuses) need their own material. Cached on the same
+## principle as mat() — an orc has two eyes and there are 200 orcs.
+static func emissive_mat(albedo: Color, emission: Color, energy: float = 1.4) -> StandardMaterial3D:
+    var key := "e%d_%d_%.2f" % [albedo.to_rgba32(), emission.to_rgba32(), energy]
+    if _mat_cache.has(key):
+        return _mat_cache[key]
+    var m := StandardMaterial3D.new()
+    m.albedo_color = albedo
+    m.roughness = 0.6
+    m.emission_enabled = true
+    m.emission = emission
+    m.emission_energy_multiplier = energy
+    _mat_cache[key] = m
+    return m
+
+## A translucent overlay, used for the placement ghost and range rings.
+static func ghost_mat(color: Color, alpha: float = 0.4) -> StandardMaterial3D:
+    var key := "g%d_%.2f" % [color.to_rgba32(), alpha]
+    if _mat_cache.has(key):
+        return _mat_cache[key]
+    var m := StandardMaterial3D.new()
+    m.albedo_color = Color(color.r, color.g, color.b, alpha)
+    m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
     _mat_cache[key] = m
     return m
 
@@ -39,5 +66,3 @@ static func box(size: Vector3, color: Color, pos := Vector3.ZERO) -> MeshInstanc
     mi.position = pos
     return mi
 
-static func cache_stats() -> Dictionary:
-    return {"materials": _mat_cache.size(), "meshes": _box_cache.size()}

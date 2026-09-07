@@ -1,17 +1,10 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scenes/main.gd" id="1"]
+[ext_resource type="Script" path="res://scenes/ui.gd" id="2"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1")
 
-[node name="Shots" type="Node3D" parent="."]
-
 [node name="UI" type="CanvasLayer" parent="."]
-
-[node name="HUD" type="Label" parent="UI"]
-offset_left = 16.0
-offset_top = 12.0
-offset_right = 900.0
-offset_bottom = 70.0
-theme_override_font_sizes/font_size = 18
+script = ExtResource("2")

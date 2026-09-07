@@ -22,6 +22,8 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 
 Cfg="*res://scripts/config.gd"
 Waves="*res://scripts/waves.gd"
+Snd="*res://scripts/audio.gd"
+SaveData="*res://scripts/save_data.gd"
 
 [display]
 
@@ -34,3 +36,5 @@ window/handheld/orientation=1
 [rendering]
 
 textures/canvas_textures/default_texture_filter=0
+anti_aliasing/quality/msaa_3d=2
+lights_and_shadows/directional_shadow/size=4096
