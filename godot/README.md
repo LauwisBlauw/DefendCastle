@@ -180,7 +180,6 @@ pure static builder with no scene-tree or autoload dependency:
 
 | file | what it ports |
 |---|---|
-| `scripts/ground_tex.gd` | `makeGroundTex` and the cobble/dirt/sand/lava makers (js 1085-1705) |
 | `scripts/buildings.gd` | the seven medieval buildings and the well (js 2645-3128) |
 | `scripts/nature.gd` | hills, rocks, ponds, lanterns, clouds, road kerbs (js 1782-1826, 2018-2138, 2419-2645) |
 

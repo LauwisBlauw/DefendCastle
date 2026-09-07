@@ -17,26 +17,6 @@ func _count(n: Node) -> int:
 
 func _ready() -> void:
     print("\n=== art layer ===")
-    var biomes := ["Meadow", "Desert", "Icelands", "Lava", "Mordor", "Doom", "Vibe"]
-    var t0 := Time.get_ticks_msec()
-    for b in biomes:
-        var tex: ImageTexture = GroundTex.make(b, 1234)
-        chk(tex != null and tex.get_width() > 0, "%s ground texture (%dx%d)" % [b, tex.get_width(), tex.get_height()])
-        var road: ImageTexture = GroundTex.make_road(b, 1234)
-        chk(road != null and road.get_width() > 0, "%s road texture" % b)
-    var ms := Time.get_ticks_msec() - t0
-    chk(ms < 8000, "all 14 textures generate in %d ms (budget 8000)" % ms)
-
-    # An unknown biome must fall back rather than error.
-    chk(GroundTex.make("NoSuchBiome", 1) != null, "unknown biome falls back to Meadow")
-
-    # Determinism: same seed, identical pixels. Levels must look the same run to run.
-    var a: ImageTexture = GroundTex.make("Meadow", 99)
-    var b2: ImageTexture = GroundTex.make("Meadow", 99)
-    chk(a.get_image().get_data() == b2.get_image().get_data(), "same seed gives identical pixels")
-    var c: ImageTexture = GroundTex.make("Meadow", 100)
-    chk(a.get_image().get_data() != c.get_image().get_data(), "a different seed gives different pixels")
-
     var rng := RandomNumberGenerator.new()
     for kind in Buildings.KINDS:
         rng.seed = 7
